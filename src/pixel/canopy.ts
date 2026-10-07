@@ -10,7 +10,7 @@ import { cellHash } from './procedural';
  * darken by themselves. Conifers are stacks of ragged skirts, each shadowed by the one above.
  */
 
-export type TreeShape = 'round' | 'cone' | 'jungle';
+export type TreeShape = 'round' | 'cone' | 'jungle' | 'shrub';
 
 /** Returned by `sampleTree` for pixels no tree covers, and for trunk pixels. Otherwise 0–1. */
 export const OUTSIDE = -1;
@@ -55,11 +55,11 @@ const smooth = (e0: number, e1: number, x: number) => {
   return t * t * (3 - 2 * t);
 };
 
-function lobesFor(cell: number, shape: 'round' | 'jungle', r: number): Lobe[] {
+function lobesFor(cell: number, shape: Exclude<TreeShape, 'cone'>, r: number): Lobe[] {
   const h = (k: number, s: number) => cellHash(cell, k, s);
-  const jungle = shape === 'jungle';
-  const lobes: Lobe[] = [{ x: (h(0, 31) - 0.5) * 0.12, y: 0.02 + (h(1, 31) - 0.5) * 0.1, r: jungle ? 0.7 : 0.66, z: 0 }];
-  const n = (jungle ? 6 : 5) + Math.floor(h(2, 31) * 2);
+  const jungle = shape === 'jungle', shrub = shape === 'shrub';
+  const lobes: Lobe[] = [{ x: (h(0, 31) - 0.5) * 0.12, y: 0.02 + (h(1, 31) - 0.5) * 0.1, r: jungle ? 0.7 : shrub ? 0.6 : 0.66, z: 0 }];
+  const n = shrub ? 3 + Math.floor(h(2, 31) * 2) : (jungle ? 6 : 5) + Math.floor(h(2, 31) * 2);
   const a0 = h(3, 31) * Math.PI * 2;
   for (let k = 0; k < n; k++) {
     const a = a0 + ((k + (h(k, 33) - 0.5) * 0.6) / n) * Math.PI * 2;
@@ -68,7 +68,7 @@ function lobesFor(cell: number, shape: 'round' | 'jungle', r: number): Lobe[] {
     lobes.push({ x, y, r: 0.4 + h(k, 37) * 0.14, z: y * 0.28 });
   }
   // Leaf clusters on top of the crown: appear only once the tree is big enough to show them.
-  const extra = r >= 10 ? Math.min(8, Math.floor((r - 6) / 3)) : 0;
+  const extra = r >= 10 && !shrub ? Math.min(8, Math.floor((r - 6) / 3)) : 0;
   for (let k = 0; k < extra; k++) {
     const a = h(k, 41) * Math.PI * 2, d = Math.sqrt(h(k, 43)) * 0.7;
     const y = Math.sin(a) * d * 0.8;
@@ -87,7 +87,7 @@ export function makeTree(x: number, y: number, r: number, shape: TreeShape, tall
   const foot = cy + 0.95 * r;
   return {
     x: cx, y: cy, r, shape, tall, cell, tone,
-    lobes: cone ? [] : lobesFor(cell, shape as 'round' | 'jungle', r),
+    lobes: cone ? [] : lobesFor(cell, shape as Exclude<TreeShape, 'cone'>, r),
     tiers, foot,
     box: [Math.floor(cx - (reach + 0.05) * r - 1), Math.floor(cy - top * r - 1), Math.ceil(cx + (reach + 0.45) * r + 1), Math.ceil(foot + 0.3 * r + 1)],
   };
@@ -123,7 +123,7 @@ function roundLum(t: Tree, dx: number, dy: number, px: number, py: number): numb
   }
   if (best === -9) {
     const trunk = t.r >= 12 ? 1.1 : 0.6;
-    return t.r >= 6 && v > 0.7 && v < 1.0 && Math.abs(dx) < trunk ? TRUNK : OUTSIDE;
+    return t.r >= 6 && t.shape !== 'shrub' && v > 0.7 && v < 1.0 && Math.abs(dx) < trunk ? TRUNK : OUTSIDE;
   }
   v = vt;
   let lum = 0.5 + (nx * LX + ny * LY + nz * LZ - 0.55) * 0.95;

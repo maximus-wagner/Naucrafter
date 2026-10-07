@@ -3,7 +3,8 @@ import { fromLonLat, toLonLat, type LonLat } from '../vector/geo';
 import { setSmooth } from './geometry';
 import { EARTH_RADIUS_KM, MOUNTAIN_DEFAULTS, VEGETATION_DEFAULTS, newId, type Item, type MapDoc, type PathNode, type RiverSection, type VPath } from './model';
 
-const FORMAT = 'worldbuilder-map';
+const FORMAT = 'naucrafter-map';
+const LEGACY_FORMAT = 'worldbuilder-map';
 
 const ll = (v: Vec3): LonLat => {
   const [lon, lat] = toLonLat(...v);
@@ -38,7 +39,7 @@ export function serializeDoc(doc: MapDoc): string {
 
 export function parseDoc(json: string): MapDoc {
   const d = JSON.parse(json);
-  if (d.format !== FORMAT) throw new Error('Not a WorldBuilder map file');
+  if (d.format !== FORMAT && d.format !== LEGACY_FORMAT) throw new Error('Not a Naucrafter map file');
   if (d.version > 1) throw new Error(`Map file version ${d.version} is newer than this app supports`);
   const items: Item[] = d.items.map((raw: Record<string, unknown>) => {
     const it = { ...raw, rev: 0, id: (raw.id as string) ?? newId() } as Record<string, unknown>;

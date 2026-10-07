@@ -1,5 +1,5 @@
 // Run with the dev server up: `npm run dev`, then `npm run ui-check`.
-// Drives the WorldBuilder UI with real mouse/keyboard input and reports what happened.
+// Drives the Naucrafter UI with real mouse/keyboard input and reports what happened.
 import puppeteer from 'puppeteer-core';
 
 const OUT = process.argv[2] ?? (await import('node:os')).tmpdir();

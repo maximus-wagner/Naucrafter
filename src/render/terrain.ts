@@ -508,7 +508,7 @@ const VEG: Record<VegetationKind, { trees: TreeShape[] | null; plant?: 'shrub' |
   conifer: { trees: ['cone'], keep: 1 },
   mixed: { trees: ['round', 'cone'], keep: 1, conifers: 0.35 },
   jungle: { trees: ['jungle'], keep: 1 },
-  shrubs: { trees: null, plant: 'shrub', keep: 0.6 },
+  shrubs: { trees: ['shrub'], keep: 0.7 },
   grass: { trees: null, plant: 'grass', keep: 0.5 },
 };
 
@@ -726,10 +726,10 @@ class TerrainFrame {
           const stand = stands.fbm(ux * fq * 1.3, uy * fq * 1.3, uz * fq * 1.3, 2);
           shape = cellHash(q.cell, 3, 9) < Math.max(0.04, Math.min(0.96, look.conifers + 1.1 * stand)) ? 'cone' : 'round';
         } else shape = look.trees[Math.floor(cellHash(q.cell, 3, 9) * look.trees.length)];
-        const r = spacing * (shape === 'cone' ? 1.0 : shape === 'jungle' ? 0.95 : 0.8) * vary * size;
+        const r = spacing * (shape === 'cone' ? 1.0 : shape === 'jungle' ? 0.95 : shape === 'shrub' ? 0.85 : 0.8) * vary * size;
         if (r < 1.2) continue;
         const tone = (cellHash(q.cell, 8, 3) - 0.5) * 0.16 + 0.12 * n;
-        this.trees.push({ tree: makeTree(x, y, r, shape, f.height, q.cell, tone), colors });
+        this.trees.push({ tree: makeTree(x, y, r, shape, shape === 'shrub' ? 0.6 * f.height : f.height, q.cell, tone), colors });
       } else {
         const w = Math.max(2, Math.round(spacing * 1.1 * vary)), h = Math.max(2, Math.round(spacing * 0.9 * f.height * vary));
         this.scatter.push({ x, y, sprite: plantSprite(look.plant!, w, h, q.cell % 16, true), colors });

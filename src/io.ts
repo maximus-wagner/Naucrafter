@@ -32,7 +32,7 @@ export function serializeWorld(world: World): string {
 
 export function deserializeWorld(json: string): { params: WorldParams; snapshot: WorldSnapshot } {
   const d = JSON.parse(json);
-  if (d.format !== FORMAT) throw new Error('Not a WorldBuilder save file');
+  if (d.format !== FORMAT) throw new Error('Not a Naucrafter save file');
   if (d.version > VERSION) throw new Error(`Save file version ${d.version} is newer than this app supports`);
   return {
     params: d.params,

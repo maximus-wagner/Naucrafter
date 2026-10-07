@@ -1,4 +1,4 @@
-# WorldBuilder — Living Project Doc
+# Naucrafter (formerly WorldBuilder) — Living Project Doc
 
 > **Self-improving doc.** Any Claude session working in this folder must read this file first and
 > follow the "Update protocol" at the bottom before finishing. Keep it short, true, and useful.
@@ -29,8 +29,8 @@ Owner is a hobbyist game dev / modder; wants both nice maps and (later) game-eng
       river stretches (bends, oxbow lakes, chutes, braided, rapids); interactions (rivers carve
       valleys/clearings, ranges straighten rivers with rapids, forests stop at the tree line);
       map palette + per-item colours. Verified: `npm test` (64 tests), `npm run ui-check`, screenshots.
-- [x] Drawing milestone 3 (2026-10-06): puffy canopy masses (sub-puff "cauliflower" detail up close,
-      no edge tree sprites); Elevation tool (raise/lower areas, ridge/valley lines) + per-land-shape
+- [x] Drawing milestone 3 (2026-10-06): woodland canopy (many small shaded trees, see Decisions →
+      Woodland; replaced the first "puffy cauliflower" crowns); Elevation tool (raise/lower areas, ridge/valley lines) + per-land-shape
       elevation; stylised rivers (double inked banks, current strokes, white-water rapids); cached
       terrain pipeline (per-item geographic fields → height-tile pyramid with LRU + bounds-based
       invalidation → cheap screen sampling; quick frames while moving, centre-first refinement when still).
@@ -54,6 +54,14 @@ Owner is a hobbyist game dev / modder; wants both nice maps and (later) game-eng
   only near changed items, coarser ancestor used until computed → `TerrainFrame` = screen-space
   sampling + shading + canopy, quick (coarser pixels, ≤4×) while moving, then full detail in
   centre-first time slices. All in `src/render/terrain.ts`.
+- **Woodland look** (owner 2026-10-06: the first crowns looked "strange and childish"): ~36 small
+  trees across a vegetation area (`TREES_ACROSS`), not a dozen giant ones. Broadleaf crowns are
+  clusters of domed lobes lit from the top-left (seams darken by themselves), conifers are ragged
+  stacked skirts, shrubs are low domes; trunks, cast ground shadows, per-tree tone, thickets/glades
+  and conifer stands from low-frequency noise, trees shrink and thin towards the outline with a few
+  saplings straying past it. Geometry/shading is pure in `src/pixel/canopy.ts`
+  (`sampleTree` → brightness; the colour ramp maps it, so every style works); placement and
+  drawing are `placePlants`/`drawTrees` in `terrain.ts`. Lattice sizes snap a quarter-octave apart.
 - **Draw freely** (owner): pencil strokes are curve-fitted to editable Bézier nodes; clicks still place points.
 - **Vector-first, drawn shapes are the source of truth** (owner chose pen & nodes). Items live in a
   `MapDoc` (`src/doc/model.ts`): land/water shapes, rivers, borders, symbols, labels.
@@ -89,17 +97,21 @@ Owner is a hobbyist game dev / modder; wants both nice maps and (later) game-eng
 - `src/doc/` also: `fit` (stroke → Bézier), `freehand`, `regionLayout` (1–20 elements, barriers),
   `river` (stretch kinds → channels/lakes/ticks); `src/render/terrain.ts` (heightfield, relief,
   vegetation masses, TerrainLayer cache); `src/render/labels.ts` (glyph layout on the sphere);
-  `src/pixel/` (procedural sprites, icon loading + key-colour swap)
+  `src/pixel/` (procedural sprites, icon loading + key-colour swap, `canopy.ts` = trees)
 - `scripts/ui-*.mjs` — puppeteer UI checks (need `npm run dev` running; `WB_URL`, `CHROME` env vars)
 
 ## Roadmap (ordered; move items up/down as priorities change)
-1. Owner tries milestone 2 and draws real icons; act on feedback (milestone 3 polish)
-2. Terrain from the drawing: heights inferred from coastline distance + painted mountain ranges
-3. Climate & biomes on the drawn world (reuse dormant sphere-mesh code)
-4. Rivers suggested procedurally, editable as normal river paths
-5. Civilizations: settlement suggestions, borders, names
-6. Tectonics as an optional "start from a generated world" mode
-7. Regional zoom + Exanima-style terrain export (16-bit heightmaps)
+1. Owner's queued river/water requests (2026-10-06, not started — see Open questions): richer water
+   & river style, more erosion (esp. through mountains, rivers behaving properly on slopes), a
+   "place a source point → generate its path downhill" button, water seeping into terrain below
+   water level.
+2. Owner tries milestone 2 and draws real icons; act on feedback (milestone 3 polish)
+3. Terrain from the drawing: heights inferred from coastline distance + painted mountain ranges
+4. Climate & biomes on the drawn world (reuse dormant sphere-mesh code)
+5. Rivers suggested procedurally, editable as normal river paths (overlaps item 1)
+6. Civilizations: settlement suggestions, borders, names
+7. Tectonics as an optional "start from a generated world" mode
+8. Regional zoom + Exanima-style terrain export (16-bit heightmaps)
 
 ## Lessons learned
 _(Add one line each time something bites: bug, gotcha, user preference. Delete when obsolete.)_
@@ -115,6 +127,12 @@ _(Add one line each time something bites: bug, gotcha, user preference. Delete w
 - The dev server on 5179 kept getting stopped (likely another session); use a different port (5182) and
   pass `WB_URL` to the UI checks.
 - Sizing anything off a power-of-two lattice: use the lattice's real step, not the requested spacing.
+- `npm run dev` started from a tool shell exits when stdin closes: run `tail -f /dev/null | npm run dev`.
+- Puppeteer `page.screenshot({ clip })`: pass `captureBeyondViewport: false`, or the clip can land on
+  the wrong part of the page (it showed the wood-plank table; the map canvas is transparent on
+  screen, so "brown planks" in a shot = the map wasn't painted/captured). Magnify pixel art by drawing the PNG
+  into a canvas with `imageSmoothingEnabled = false`, not by zooming the app.
+- Unexplained: a headless screenshot at globe zoom ≥ ~15 showed only the desk colour (zoom ≤ 10 fine).
 - Dijkstra `dist` arrays must be Float64 — Float32 rounding vs Float64 heap keys skips valid entries.
 - Opening an <input> from a canvas pointerdown: focus it in a setTimeout, or the browser's own
   mousedown focus handling blurs it immediately.
@@ -133,8 +151,16 @@ _(Add one line each time something bites: bug, gotcha, user preference. Delete w
 - After trying the editor: which drawing tools feel wrong or missing?
 - Exanima regional editor: which features matter most (brushes? texture painting? objects)?
 - Target engines and heightmap sizes for export?
+- Rivers/water (owner, mid-turn 2026-10-06): "have both style" — pixel-art like terrain, shaded vector, or both?
+  "Seep into below-water-level terrain" — flood/marsh next to rivers and lakes, or the sea inundating land
+  that the heightfield puts below sea level? Should "generate its path down" follow the painted heightfield
+  (mountains/elevation edits) and end as an editable river path?
 
 ## Changelog
+- 2026-10-06 — Renamed WorldBuilder → Naucrafter (title, package, Pages base `/Naucrafter/`, save format `naucrafter-map`, autosave key; old `worldbuilder-map` files/autosave still load). Added GitHub Pages deploy workflow (`.github/workflows/deploy.yml`, push to `master`); git initialised. Project folder still named WorldBuilder.
+- 2026-10-06 — Woodland rewrite (owner: old trees "strange and childish"): `src/pixel/canopy.ts` + `terrain.ts`
+  placement/drawing; ~36 trees across, lobed broadleaf, tiered conifers, low shrubs, shadows, glades, edge
+  thinning, stray saplings; tests/canopy.test.ts; verified `npm test` (75), `npm run build`, `npm run ui-check`.
 - 2026-10-06 — Milestone 3: puffy forests, elevation editing, stylised rivers, cached/progressive terrain.
 - 2026-10-06 — Drawing milestone 2: pencil, pixel icons/symbols, planet size, deep zoom, pixel-art
   terrain/relief/vegetation, river stretches, feature interactions, colours.

@@ -19,7 +19,8 @@ import { buildTableTools } from './tableTools';
 import { labelSpan } from './render/labels';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
-const AUTOSAVE_KEY = 'worldbuilder.autosave';
+const AUTOSAVE_KEY = 'naucrafter.autosave';
+const LEGACY_AUTOSAVE_KEY = 'worldbuilder.autosave';
 
 const view = new MapView($('viewport'));
 const app = new App(view);
@@ -800,7 +801,7 @@ function initialDoc() {
   const q = new URLSearchParams(location.search);
   if (q.has('sample')) return sampleDoc();
   try {
-    const saved = localStorage.getItem(AUTOSAVE_KEY);
+    const saved = localStorage.getItem(AUTOSAVE_KEY) ?? localStorage.getItem(LEGACY_AUTOSAVE_KEY);
     if (saved) return parseDoc(saved);
   } catch {
     // Fall through to the sample.
