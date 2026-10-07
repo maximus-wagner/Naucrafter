@@ -48,7 +48,7 @@ export const STYLES: Record<StyleId, MapStyle> = {
   parchment: {
     id: 'parchment',
     name: 'Parchment',
-    desk: '#5e432a',
+    desk: '#2c2c2e',
     sea: '#d8c9a3',
     land: '#eee2c2',
     ink: '#3b2a1a',

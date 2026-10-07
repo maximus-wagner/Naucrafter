@@ -1,0 +1,13 @@
+{
+ "format": "naucrafter-map",
+ "version": 1,
+ "seed": "atlas",
+ "planet": {
+  "radiusKm": 7532
+ },
+ "palette": {
+  "sea": "#1f3a5f",
+  "river": "#3b5f8f"
+ },
+ "items": []
+}

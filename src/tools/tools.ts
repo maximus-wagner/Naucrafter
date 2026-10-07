@@ -1,7 +1,7 @@
 import { geoContains } from 'd3-geo';
 import type { Vec3 } from '../core/math';
 import { fromLonLat } from '../vector/geo';
-import { angle, flatten, mirror, moveNode, rotation, setSmooth, splitSegment, unit } from '../doc/geometry';
+import { angle, flatten, mirror, moveNode, rotation, setSmooth, slerp, splitSegment } from '../doc/geometry';
 import { FLATTEN_STEP } from '../doc/cache';
 import { newId, pathOf, type Item, type PathNode, type VPath } from '../doc/model';
 import { strokeToPath } from '../doc/freehand';
@@ -22,14 +22,6 @@ import {
   type ToolEvent,
   type ToolHost,
 } from './base';
-
-function slerp(a: Vec3, b: Vec3, t: number): Vec3 {
-  const w = angle(a, b);
-  if (w < 1e-9) return a;
-  const s = Math.sin(w);
-  const ka = Math.sin((1 - t) * w) / s, kb = Math.sin(t * w) / s;
-  return unit(a[0] * ka + b[0] * kb, a[1] * ka + b[1] * kb, a[2] * ka + b[2] * kb);
-}
 
 /** Move one handle; on a smooth node the opposite handle turns to stay in line (keeping its length). */
 function setHandle(node: PathNode, which: 'hin' | 'hout', v: Vec3, keepSmooth: boolean): void {
@@ -207,6 +199,8 @@ function outline(p: CanvasPainter, host: ToolHost, item: Item, hover: boolean): 
 
 export type PenKind = 'land' | 'cut' | 'river' | 'border' | 'forest' | 'mountains' | 'relief';
 
+const SPRING_HINT = 'River spring · click a spot on land and a river is generated from it, flowing downhill to the sea (or into a river it meets) · switch back to Draw in the panel to draw by hand';
+
 const PEN_HINTS: Record<PenKind, string> = {
   land: 'Land · draw a coastline freely and it becomes a smooth, editable outline · or click to place points (click the first one, double-click or Enter to close)',
   cut: 'Water · draw lakes and bays freely; they are cut out of the land · or click to place points',
@@ -233,8 +227,13 @@ export class PenTool implements Tool {
 
   constructor(private host: ToolHost, readonly id: PenKind) {}
 
+  /** The river tool in Spring mode: a click starts a river that finds its own way downhill. */
+  private get spring(): boolean {
+    return this.id === 'river' && this.host.app.defaults.riverMode === 'spring';
+  }
+
   get hint(): string {
-    return PEN_HINTS[this.id];
+    return this.spring ? SPRING_HINT : PEN_HINTS[this.id];
   }
 
   /** Areas always close; rivers and elevation lines never; borders close if you end where you started. */
@@ -255,6 +254,10 @@ export class PenTool implements Tool {
 
   down(e: ToolEvent): void {
     if (!e.v) return;
+    if (this.spring) {
+      if (e.geo && !this.host.app.generateRiver(e.geo)) this.host.notify('A spring needs dry land: click on the land, not on water.');
+      return;
+    }
     if (this.nearFirst(e.x, e.y)) {
       this.finish(true);
       return;

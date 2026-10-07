@@ -18,6 +18,15 @@ function lerp(a: Vec3, b: Vec3, t: number): Vec3 {
   return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
 }
 
+/** Point a fraction `t` of the way along the great circle from a to b. */
+export function slerp(a: Vec3, b: Vec3, t: number): Vec3 {
+  const w = angle(a, b);
+  if (w < 1e-9) return a;
+  const s = Math.sin(w);
+  const ka = Math.sin((1 - t) * w) / s, kb = Math.sin(t * w) / s;
+  return unit(a[0] * ka + b[0] * kb, a[1] * ka + b[1] * kb, a[2] * ka + b[2] * kb);
+}
+
 /** Cubic Bézier evaluated in 3D and pushed back onto the sphere. */
 export function bezier(p0: Vec3, c0: Vec3, c1: Vec3, p1: Vec3, t: number): Vec3 {
   const u = 1 - t;

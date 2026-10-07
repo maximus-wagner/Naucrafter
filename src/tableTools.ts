@@ -1,4 +1,4 @@
-/** The tools as physical objects lying on the table (the alternative to the left-hand button toolbox). */
+/** The tools as physical objects lying on the table . */
 
 const OUT = 'stroke="#2a2219" stroke-opacity=".75" stroke-width=".9" stroke-linejoin="round"';
 /** Cylinder shading laid over a coloured shape: light on top, shadow underneath. */
@@ -13,7 +13,21 @@ function pencil(body: string, lead: string): string {
     <path d="M105 17.4 112 20 105 22.6Z" fill="${lead}" ${OUT}/>`;
 }
 
+/** Graduations along the top edge of the ruler: a long mark every fifth, a medium one every other. */
+function rulerTicks(): string {
+  let d = '';
+  for (let i = 0, x = 10; x <= 100; i++, x += 4.5) d += `M${x.toFixed(1)} 13v${i % 5 === 0 ? 7 : i % 2 === 0 ? 4.5 : 3}`;
+  return `<path d="${d}" stroke="#4a3a24" stroke-width=".8" fill="none"/>`;
+}
+
 const ART: Record<string, string> = {
+  measure: `
+    ${cyl(`<path d="M3 13H104V28H3Z" fill="#e4c98f" ${OUT}/>`)}
+    ${rulerTicks()}
+    <path d="M12 25h20M44 25h20" stroke="#8a7348" stroke-width=".6" opacity=".7"/>
+    <circle cx="9" cy="24.5" r="1.7" fill="#3a2a1c" opacity=".85"/>
+    ${cyl(`<path d="M104 13H114V28H104Z" fill="#c9a24a" ${OUT}/>`)}
+    <circle cx="109" cy="20.5" r="1.3" fill="#7a5a1c"/>`,
   select: `
     ${cyl(`<path d="M4 16 92 18.6V21.4L4 24Z" fill="#7a5230" ${OUT}/>`)}
     <rect x="3" y="15" width="12" height="10" rx="4" fill="#3a2a1c" ${OUT}/>
@@ -71,6 +85,7 @@ interface Def { id: string; title: string; key: string; r: number }
 const DEFS: Def[] = [
   { id: 'select', title: 'Select & edit (V)', key: 'V', r: -4 },
   { id: 'hand', title: 'Hand (H)', key: 'H', r: 5 },
+  { id: 'measure', title: 'Measure distances and areas (D)', key: 'D', r: -3 },
   { id: 'land', title: 'Land pen (L)', key: 'L', r: -6 },
   { id: 'cut', title: 'Water pen: lakes and bays (W)', key: 'W', r: 3 },
   { id: 'river', title: 'River pen (R)', key: 'R', r: -3 },
@@ -105,10 +120,4 @@ export function buildTableTools(host: HTMLElement): void {
     b.addEventListener('pointerdown', (e) => e.stopPropagation());
     host.append(b);
   }
-  const sw = document.createElement('button');
-  sw.className = 'modeswitch table-side';
-  sw.dataset.cmd = 'tooltable';
-  sw.title = 'Put the tools back in the toolbox';
-  sw.textContent = 'Toolbox';
-  host.append(sw);
 }

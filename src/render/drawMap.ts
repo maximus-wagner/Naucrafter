@@ -1,13 +1,13 @@
-import { geoDistance, geoGraticule10, type GeoPermissibleObjects } from 'd3-geo';
+import { geoContains, geoDistance, geoGraticule10, type GeoPermissibleObjects } from 'd3-geo';
 import type { MapDoc, RiverShape } from '../doc/model';
 import { areaPolygon, detailLevel, type GeometryCache } from '../doc/cache';
-import type { RiverGeometry } from '../doc/river';
-import { RAD } from '../doc/geometry';
-import { lineToLonLat, toLonLat } from '../vector/geo';
+import { lineToLonLat, toLonLat, type LonLat } from '../vector/geo';
 import { symbolSprite, variantOf } from '../pixel/sprites';
 import { labelLook, layoutLabel } from './labels';
 import { renderTerrain, type TerrainLayer } from './terrain';
 import { CanvasPainter, type Painter } from './painter';
+import { paintMouths, paintRivers, planRivers } from './rivers';
+import { pxPerDegree, screenRuns } from './screen';
 import { withInk, type MapStyle } from './styles';
 
 const SPHERE: GeoPermissibleObjects = { type: 'Sphere' };
@@ -26,114 +26,7 @@ export interface DrawOptions {
   onTable?: boolean;
 }
 
-/**
- * Project a polyline (flat xyz) to screen, split into visible runs: breaks where it passes
- * behind the globe or jumps across the sheet edge (date line).
- */
-export function screenRuns(p: Painter, pts: number[], extra?: number[]): { pts: [number, number][]; extra: number[] }[] {
-  const runs: { pts: [number, number][]; extra: number[] }[] = [];
-  let cur: { pts: [number, number][]; extra: number[] } | null = null;
-  const jump = Math.max(p.width, p.height) / 3;
-  for (let i = 0; i < pts.length; i += 3) {
-    const s = p.visible(toLonLat(pts[i], pts[i + 1], pts[i + 2]), 1e6);
-    const prev = cur?.pts[cur.pts.length - 1];
-    if (!s || (prev && Math.hypot(s[0] - prev[0], s[1] - prev[1]) > jump)) {
-      if (cur && cur.pts.length > 1) runs.push(cur);
-      cur = null;
-      if (!s) continue;
-    }
-    if (!cur) cur = { pts: [], extra: [] };
-    cur.pts.push(s);
-    if (extra) cur.extra.push(extra[i / 3]);
-  }
-  if (cur && cur.pts.length > 1) runs.push(cur);
-  return runs;
-}
-
-/** Pixels per degree of arc at the current zoom. */
-export const pxPerDegree = (p: Painter) => p.projection.scale() * RAD;
-
-type Pt = [number, number];
-
-/** Left and right banks of a screen polyline with a width per point. */
-function banks(pts: Pt[], widths: number[]): { left: Pt[]; right: Pt[] } {
-  const left: Pt[] = [], right: Pt[] = [];
-  for (let i = 0; i < pts.length; i++) {
-    const a = pts[Math.max(0, i - 1)], b = pts[Math.min(pts.length - 1, i + 1)];
-    const dx = b[0] - a[0], dy = b[1] - a[1], l = Math.hypot(dx, dy) || 1;
-    const nx = -dy / l, ny = dx / l, h = widths[i] / 2;
-    left.push([pts[i][0] + nx * h, pts[i][1] + ny * h]);
-    right.push([pts[i][0] - nx * h, pts[i][1] - ny * h]);
-  }
-  return { left, right };
-}
-
-/**
- * A stylised river: a single ink line near the source that opens into two inked banks with water
- * between as it widens, with faint current strokes in wide stretches and white water at rapids.
- */
-function drawRiver(p: Painter, river: RiverShape, geo: RiverGeometry, style: MapStyle): void {
-  const ink = river.color ?? style.river;
-  const water = style.sea;
-  const pts = geo.main;
-  // Width tapers from a trickle at the source to full width at the mouth.
-  const n = pts.length / 3;
-  const along: number[] = [0];
-  for (let i = 1; i < n; i++) {
-    const a = i * 3 - 3, b = i * 3;
-    along.push(along[i - 1] + Math.hypot(pts[b] - pts[a], pts[b + 1] - pts[a + 1], pts[b + 2] - pts[a + 2]));
-  }
-  const total = along[n - 1] || 1;
-  const mouth = Math.min(22, Math.max(1.2, river.width * pxPerDegree(p) * 1.6));
-  const widths = along.map((d) => Math.max(0.8, mouth * (0.1 + 0.9 * Math.pow(d / total, 0.8))));
-  const OPEN = 3.2; // wider than this (px), the river is drawn with two banks
-
-  for (const lake of geo.lakes) {
-    const ring = lineToLonLat(lake);
-    ring.push(ring[0]);
-    p.path({ type: 'Polygon', coordinates: [ring] }, { fill: water, stroke: ink, width: 1 });
-  }
-  const channel = (run: Pt[], w: number[]) => {
-    // Narrow stretches: one tapering ink line, in short chunks so the width can change.
-    for (let i = 0; i < run.length - 1; i += 5) {
-      const k = Math.min(w.length - 1, i + 2);
-      if (w[k] < OPEN) p.polyline(run.slice(i, i + 6), { stroke: ink, width: Math.max(0.8, w[k] * 0.75) });
-    }
-    // Wide stretches: water between two inked banks.
-    let start = -1;
-    for (let i = 0; i <= run.length; i++) {
-      const open = i < run.length && w[i] >= OPEN;
-      if (open && start < 0) start = Math.max(0, i - 1);
-      if (!open && start >= 0) {
-        const seg = run.slice(start, i), sw = w.slice(start, i);
-        const { left, right } = banks(seg, sw);
-        p.polyline([...left, ...right.slice().reverse()], { fill: water }, true);
-        p.polyline(left, { stroke: ink, width: 1 });
-        p.polyline(right, { stroke: ink, width: 1 });
-        // Current: short strokes along the middle of the widest parts.
-        for (let j = 4; j < seg.length - 4; j += 9) {
-          if (sw[j] < 7) continue;
-          const off = (j % 18 === 4 ? 0.18 : -0.18) * sw[j];
-          const { left: l } = banks(seg.slice(j - 2, j + 3), sw.slice(j - 2, j + 3).map(() => off * 2));
-          p.polyline(l, { stroke: ink, width: 0.8, opacity: 0.45 });
-        }
-        start = -1;
-      }
-    }
-  };
-  for (const side of geo.side) {
-    for (const run of screenRuns(p, side)) channel(run.pts, run.pts.map(() => Math.max(0.8, mouth * 0.42)));
-  }
-  for (const run of screenRuns(p, pts, widths)) channel(run.pts, run.extra);
-  // Rapids: little white-water strokes across the stream.
-  for (const tick of geo.ticks) {
-    for (const run of screenRuns(p, tick)) {
-      const [a, b] = [run.pts[0], run.pts[run.pts.length - 1]];
-      const m: Pt = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
-      p.polyline([[a[0] * 0.6 + m[0] * 0.4, a[1] * 0.6 + m[1] * 0.4], [b[0] * 0.6 + m[0] * 0.4, b[1] * 0.6 + m[1] * 0.4]], { stroke: '#ffffff', width: 1.4, opacity: 0.85 });
-    }
-  }
-}
+export { pxPerDegree, screenRuns };
 
 /** Draw a whole map document. Same code for the screen (canvas) and exports (SVG/PNG). */
 export function drawMap(p: Painter, doc: MapDoc, cache: GeometryCache, style: MapStyle, opts: DrawOptions): void {
@@ -183,9 +76,8 @@ export function drawMap(p: Painter, doc: MapDoc, cache: GeometryCache, style: Ma
   }
 
   p.beginClip(land.geo);
-  for (const item of doc.items) {
-    if (item.kind === 'river' && item.path.nodes.length >= 2) drawRiver(p, item, cache.river(doc, item), style);
-  }
+  const rivers = planRivers(p, doc.items.filter((i): i is RiverShape => i.kind === 'river' && i.path.nodes.length >= 2).map((river) => ({ river, geo: cache.river(doc, river) })), style);
+  paintRivers(p, rivers, style);
   for (const item of doc.items) {
     if (item.kind !== 'border' || item.path.nodes.length < 2) continue;
     const coords = lineToLonLat(cache.shape(item, doc.seed, level));
@@ -196,6 +88,12 @@ export function drawMap(p: Painter, doc: MapDoc, cache: GeometryCache, style: Ma
   p.endClip();
 
   p.path(land.lines, { stroke: style.ink, width: style.coastWidth });
+  // Where a river runs into the sea or a lake, the coast would cut across its mouth: water over water.
+  const lakes = doc.items.filter((i) => i.kind === 'land' && i.op === 'cut' && i.color && i.path.nodes.length >= 3);
+  paintMouths(p, rivers, land.geo, (at: LonLat) => {
+    for (const lake of lakes) if (lake.kind === 'land' && geoContains(areaPolygon(cache.shape(lake, doc.seed, level)), at)) return lake.color!;
+    return style.sea;
+  });
 
   // Symbols, north to south so nearer (lower) marks overlap the ones behind them.
   const symbols = doc.items.filter((i) => i.kind === 'symbol').map((s) => ({ s, at: toLonLat(...s.at) }));

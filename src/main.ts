@@ -5,18 +5,22 @@ import { STYLES, type StyleId } from './render/styles';
 import { CanvasPainter, SvgPainter } from './render/painter';
 import { drawMap } from './render/drawMap';
 import { parseDoc, sampleDoc, serializeDoc } from './doc/io';
-import { EARTH_RADIUS_KM, emptyDoc, pathOf, type Item, type Label, type LabelStyle, type MountainLook, type PaletteKey, type RiverSection, type VegetationKind, type VegetationLook, type VPath } from './doc/model';
+import { EARTH_RADIUS_KM, emptyDoc, isPathItem, pathOf, type Item, type Label, type LabelStyle, type MountainLook, type PaletteKey, type RiverSection, type RiverShape, type VegetationKind, type VegetationLook, type VPath } from './doc/model';
 import { RIVER_SECTIONS } from './doc/river';
 import { setSmooth } from './doc/geometry';
-import { fromLonLat } from './vector/geo';
+import { fromLonLat, toLonLat } from './vector/geo';
 import { HandTool, PenTool, SelectTool, StampTool, TextTool } from './tools/tools';
+import { MeasureTool } from './tools/measure';
+import { TRAVEL, compass, flatRingAreaKm2, formatArea, formatDays, formatDistance, lineLengthKm } from './doc/measure';
 import { type Tool, type ToolEvent, type ToolHost, type ToolId } from './tools/base';
-import { loadIcons, toolIcon } from './pixel/icons';
+import { loadIcons } from './pixel/icons';
 import { symbolChoices } from './pixel/sprites';
-import { hexToRgba } from './pixel/palette';
 import { colorWell } from './colorPicker';
 import { buildTableTools } from './tableTools';
 import { labelSpan } from './render/labels';
+import { wireUiSounds, play } from './sound';
+
+wireUiSounds();
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const AUTOSAVE_KEY = 'naucrafter.autosave';
@@ -57,10 +61,27 @@ function editText(initial: string, x: number, y: number, done: (text: string | n
   setTimeout(() => input.addEventListener('blur', onBlur));
 }
 
-const host: ToolHost = { app, editText };
+let hintTimer = 0;
+function notify(message: string): void {
+  $('hint').textContent = message;
+  clearTimeout(hintTimer);
+  hintTimer = window.setTimeout(() => ($('hint').textContent = tool.hint), 4000);
+}
+
+const host: ToolHost = {
+  app,
+  editText,
+  notify,
+  refresh: () => renderProps(),
+  setCursor: (c) => {
+    if (!pan && !spaceHeld) view.overlay.style.cursor = c ?? tool.cursor;
+  },
+};
+const measure = new MeasureTool(host);
 const tools: Record<ToolId, Tool> = {
   select: new SelectTool(host),
   hand: new HandTool(),
+  measure,
   land: new PenTool(host, 'land'),
   cut: new PenTool(host, 'cut'),
   river: new PenTool(host, 'river'),
@@ -71,7 +92,7 @@ const tools: Record<ToolId, Tool> = {
   stamp: new StampTool(host),
   text: new TextTool(host),
 };
-const SHORTCUTS: Record<string, ToolId> = { v: 'select', h: 'hand', l: 'land', w: 'cut', r: 'river', b: 'border', f: 'forest', m: 'mountains', e: 'relief', s: 'stamp', t: 'text' };
+const SHORTCUTS: Record<string, ToolId> = { v: 'select', h: 'hand', d: 'measure', l: 'land', w: 'cut', r: 'river', b: 'border', f: 'forest', m: 'mountains', e: 'relief', s: 'stamp', t: 'text' };
 let tool: Tool = tools.select;
 
 function setTool(id: ToolId): void {
@@ -86,17 +107,6 @@ function setTool(id: ToolId): void {
 buildTableTools($('tabletools'));
 for (const b of document.querySelectorAll<HTMLElement>('[data-tool]')) b.addEventListener('click', () => setTool(b.dataset.tool as ToolId));
 
-/** Tools live either in the left toolbox or as objects on the table. Remembered between visits. */
-const TOOL_MODE_KEY = 'wb-tools-on-table';
-function setToolsOnTable(on: boolean): void {
-  document.body.classList.toggle('table-tools', on);
-  try {
-    localStorage.setItem(TOOL_MODE_KEY, on ? '1' : '0');
-  } catch {
-    /* private mode: just don't remember */
-  }
-  refreshMenus();
-}
 function setDesk(): void {
   $('viewport').style.setProperty('--desk', app.style.desk);
 }
@@ -236,7 +246,6 @@ function refreshMenus(): void {
     if (cmd.startsWith('style:')) b.classList.toggle('checked', app.styleId === cmd.slice(6));
     if (cmd === 'graticule') b.classList.toggle('checked', app.graticule);
     if (cmd === 'scalebar') b.classList.toggle('checked', app.scaleBar);
-    if (cmd === 'tooltable') b.classList.toggle('checked', document.body.classList.contains('table-tools'));
     if (cmd === 'undo') b.disabled = !app.canUndo();
     if (cmd === 'redo') b.disabled = !app.canRedo();
     if (cmd === 'delete') b.disabled = !app.selection;
@@ -321,9 +330,6 @@ function run(cmd: string): void {
     case 'reset-view':
       view.resetView();
       break;
-    case 'tooltable':
-      setToolsOnTable(!document.body.classList.contains('table-tools'));
-      break;
   }
 }
 
@@ -335,6 +341,7 @@ $('file-input').addEventListener('change', async (e) => {
   try {
     app.setDoc(parseDoc(await file.text()));
   } catch (err) {
+    play('fail');
     alert(`Could not open that file: ${err instanceof Error ? err.message : err}`);
   }
 });
@@ -516,18 +523,48 @@ function editItem<T extends Item>(item: T, fn: (item: T) => void): void {
   renderProps();
 }
 
+function measureSection(): HTMLElement {
+  const r = measure.readout();
+  const u = measure.units;
+  const units = row('Units', segmented<'km' | 'mi'>([['km', 'Kilometres'], ['mi', 'Miles']], u, (v) => (measure.setUnits(v), renderProps())));
+  if (!r.points) {
+    return section('Measure', units, el('p', { className: 'note' }, `Click points across the map to measure along the way. Distances are real ones for this planet (radius ${app.doc.planet.radiusKm.toLocaleString('en')} km) and follow the curve of the world. Points snap to towns and path nodes.`));
+  }
+  const out = (text: string) => el('output', {}, text);
+  const rows: HTMLElement[] = [units];
+  if (r.legsKm.length) {
+    rows.push(row(r.closed ? 'Perimeter' : 'Distance', out(formatDistance(r.totalKm, u))));
+    if (r.legsKm.length > 1) {
+      r.legsKm.slice(0, 8).forEach((km, i) => rows.push(row(`Leg ${i + 1}`, out(formatDistance(km, u)))));
+      if (r.legsKm.length > 8) rows.push(row('…', out(`${r.legsKm.length - 8} more`)));
+    }
+    if (r.bearing !== null) rows.push(row('Heading', out(`${compass(r.bearing)} · ${Math.round(r.bearing)}°`)));
+    if (r.areaKm2 !== null) rows.push(row('Area', out(formatArea(r.areaKm2, u))));
+    for (const t of TRAVEL) rows.push(row(t.label, out(formatDays(r.totalKm / t.kmPerDay))));
+  }
+  rows.push(
+    el('p', { className: 'note' }, r.legsKm.length ? 'Travel times are rough, straight along the line at 30, 60 and 150 km a day. Drag a point to adjust it.' : 'Click again, or drag, to measure to a second point.'),
+    el('div', { className: 'buttons' }, button('Clear', () => measure.clear())),
+  );
+  return section('Measure', ...rows);
+}
+
 function toolSection(): HTMLElement | null {
   const d = app.defaults;
   switch (tool.id) {
+    case 'measure':
+      return measureSection();
     case 'land':
     case 'cut':
       return section('New shapes', row('Roughness', slider(0, 2, 0.05, d.rough, (v) => (d.rough = v), pct)));
     case 'river':
       return section(
         'New rivers',
+        row('Mode', segmented([['draw', 'Draw'], ['spring', 'Spring']], d.riverMode, (v) => ((d.riverMode = v), ($('hint').textContent = tool.hint), renderProps()))),
         row('Mouth width', slider(1, 16, 0.5, d.riverPx, (v) => (d.riverPx = v), px)),
-        row('Stretches', select(RIVER_SECTIONS, d.riverSection, (v) => (d.riverSection = v))),
+        ...(d.riverMode === 'draw' ? [row('Stretches', select(RIVER_SECTIONS, d.riverSection, (v) => (d.riverSection = v)))] : []),
         row('Wobble', slider(0, 2, 0.05, d.rough, (v) => (d.rough = v), pct)),
+        el('p', { className: 'note' }, d.riverMode === 'spring' ? 'Click land to place a spring. The river finds its own way down: it never climbs a ridge, leaves a basin by its lowest pass, runs fast and straight through steep country, bends and leaves oxbows on the flats, and joins a river it meets. Stretches are set from the slope.' : 'Draw a river by hand from source to mouth, or switch to Spring to have one generated from a point.'),
       );
     case 'forest':
       return section('New vegetation', ...vegetationRows(d.vegetation, { undoable: false, changed: () => {} }));
@@ -564,6 +601,13 @@ function toolSection(): HTMLElement | null {
     default:
       return null;
   }
+}
+
+/** Replace a river's course with the way water would really flow from its source. */
+function rerouteDownhill(river: RiverShape): void {
+  const geo = toLonLat(...river.path.nodes[0].p);
+  if (!app.generateRiver(geo, river)) notify('This river starts in the water, so it has no downhill course to follow.');
+  else renderProps();
 }
 
 /** Give a straight label a gentle curve the user can then bend with the Select tool. */
@@ -608,7 +652,7 @@ function selectionSection(item: Item): HTMLElement {
         row('Wobble', slider(0, 2, 0.05, item.rough, (v) => live(() => (item.rough = v))(), pct, true)),
         itemColor(item, 'Colour', app.style.river),
         el('p', { className: 'note' }, node !== null && node < stretchCount ? 'Sets the stretch from this node to the next.' : 'Click a node of the river to set the stretch that starts there. Rivers run straight with rapids through mountains, and carve valleys and clearings.'),
-        el('div', { className: 'buttons' }, button('Reverse direction', () => editItem(item, (i) => reversePath(i.path))), del),
+        el('div', { className: 'buttons' }, button('Reverse direction', () => editItem(item, (i) => reversePath(i.path))), button('Flow downhill from source', () => rerouteDownhill(item)), del),
       );
     }
     case 'border':
@@ -769,12 +813,27 @@ function itemColor(item: Item, label: string, fallback: string): HTMLElement {
   });
 }
 
+/** Real-world size of the selected line or area, as the map draws it. */
+function sizeRows(item: Item): HTMLElement[] {
+  if (!isPathItem(item)) return [];
+  const radius = app.doc.planet.radiusKm, u = measure.units;
+  const pts = app.cache.shape(item, app.doc.seed);
+  const out = (text: string) => el('output', {}, text);
+  if (!item.path.closed) return [row('Length', out(formatDistance(lineLengthKm(pts, radius), u)))];
+  return [
+    row('Area', out(formatArea(flatRingAreaKm2(pts, radius), u))),
+    row('Perimeter', out(formatDistance(lineLengthKm(pts.concat(pts.slice(0, 3)), radius), u))),
+  ];
+}
+
 function renderProps(): void {
   const props = $('props');
   // Don't rebuild while the user is typing in the panel.
   if (props.contains(document.activeElement) && document.activeElement instanceof HTMLInputElement && document.activeElement.type === 'text') return;
   const sel = app.selected();
-  props.replaceChildren(...[toolSection(), sel && selectionSection(sel), mapSection(), colorsSection()].filter((s): s is HTMLElement => !!s));
+  const selected = sel && selectionSection(sel);
+  if (sel && selected) selected.querySelector('h3')?.after(...sizeRows(sel));
+  props.replaceChildren(...[toolSection(), selected, mapSection(), colorsSection()].filter((s): s is HTMLElement => !!s));
   if (!app.doc.items.length) {
     props.prepend(section('Empty map', el('p', { className: 'note' }, 'Pick the Land pen (L) and click around to draw a coastline — click the first node to close it. Or open the sample map from the File menu.')));
   }
@@ -811,33 +870,7 @@ function initialDoc() {
 
 // ---------------------------------------------------------------- pixel-art tool icons
 
-/** Fill the tool palette with your pixel icons: black/white/grey keys take the UI's ink colours. */
-function setupToolIcons(): void {
-  const css = getComputedStyle(document.documentElement);
-  const color = (name: string) => hexToRgba(css.getPropertyValue(name).trim());
-  const normal = { ink: color('--ink'), paper: color('--paper-light'), shade: color('--rule') };
-  const active = { ink: color('--paper'), paper: color('--ink'), shade: color('--ink-soft') };
-  for (const b of document.querySelectorAll<HTMLElement>('.tool')) {
-    const id = b.dataset.tool!;
-    const icons = [toolIcon(id, normal), toolIcon(id, active)];
-    if (!icons[0] || !icons[1]) {
-      b.prepend(el('span', { className: 'icon-letter' }, id[0].toUpperCase()));
-      continue;
-    }
-    icons.forEach((c, i) => {
-      c!.className = `icon ${i ? 'icon-active' : 'icon-normal'}`;
-      b.prepend(c!);
-    });
-  }
-}
-
 await loadIcons();
-setupToolIcons();
-try {
-  setToolsOnTable(localStorage.getItem(TOOL_MODE_KEY) === '1');
-} catch {
-  /* no storage */
-}
 
 const query = new URLSearchParams(location.search);
 app.setDoc(initialDoc());

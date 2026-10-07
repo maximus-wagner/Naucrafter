@@ -1,10 +1,21 @@
 import type { Vec3 } from '../core/math';
 import type { RiverSection, VPath } from './model';
 import { angle, bezier, roughen, segmentControls, segmentCount, unit } from './geometry';
+import { arcFractions, relaxBends, removeLoops } from './bends';
+
+/** A river is drawn this many times its width setting wide at the mouth. */
+export const MOUTH_SCALE = 1.6;
+/** Tightest bend allowed, as a multiple of the channel's half-width (below ~1 the banks fold over). */
+const MIN_BEND = 1.5;
+
+/** Channel width as a fraction of the mouth width: a trickle at the source, full width at the mouth. */
+export const taperAt = (frac: number) => 0.1 + 0.9 * Math.pow(Math.min(1, Math.max(0, frac)), 0.8);
 
 export interface RiverGeometry {
   /** Main channel, source to mouth (flat xyz). */
   main: number[];
+  /** Channel width at each point of `main`, as a fraction of the mouth width (see `taperAt`). */
+  taper: number[];
   /** Side channels (chutes, braids), drawn thinner (flat xyz each). */
   side: number[][];
   /** Oxbow lakes: closed rings (flat xyz). */
@@ -57,7 +68,7 @@ function sampleSegment(path: VPath, i: number, step: number): Sample[] {
  * and get rapids — rivers run fast through mountains.
  */
 export function riverGeometry(path: VPath, widthRad: number, rough: number, seed: string, inMountains?: (p: Vec3) => boolean): RiverGeometry {
-  const out: RiverGeometry = { main: [], side: [], lakes: [], ticks: [] };
+  const out: RiverGeometry = { main: [], taper: [], side: [], lakes: [], ticks: [] };
   const w = Math.max(widthRad, 1e-5);
   const segs = segmentCount(path);
   for (let i = 0; i < segs; i++) {
@@ -67,7 +78,8 @@ export function riverGeometry(path: VPath, widthRad: number, rough: number, seed
     const waves = Math.max(1, Math.round(L / (w * 16)));
     const lambda = L / waves;
     const A = lambda * 0.3;
-    const win = (s: number) => Math.pow(Math.sin((Math.PI * s) / L), 0.6);
+    // Rounding can push sin() a hair below zero at the very end, and pow of a negative is NaN.
+    const win = (s: number) => Math.pow(Math.max(0, Math.sin((Math.PI * s) / L)), 0.6);
     const mountain = samples.map((a) => !!inMountains?.(a.p));
 
     const main = samples.map((a, k) => {
@@ -127,5 +139,10 @@ export function riverGeometry(path: VPath, widthRad: number, rough: number, seed
     });
   }
   out.main = roughen(out.main, false, rough * 0.2, seed);
+  // The drawn banks run half a channel-width either side of this line, so it must not bend more
+  // tightly than that, nor cross itself (sharp corners and bends of the drawn line do both).
+  const tightest = (frac: number) => MIN_BEND * 0.5 * MOUTH_SCALE * w * taperAt(frac);
+  out.main = relaxBends(removeLoops(relaxBends(out.main, tightest)), tightest);
+  out.taper = arcFractions(out.main).map(taperAt);
   return out;
 }

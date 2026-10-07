@@ -6,7 +6,7 @@ import { RAD } from '../doc/geometry';
 import { fromLonLat, lineToLonLat } from '../vector/geo';
 import { Fbm } from '../core/noise';
 import { EMPTY, INK, PAPER, SHADE, SNOW, cellHash, plantSprite, type IndexSprite } from '../pixel/procedural';
-import { OUTSIDE, TRUNK, makeTree, outlineDistance, sampleTree, shadowOf, type Tree, type TreeShape } from '../pixel/canopy';
+import { OUTSIDE, TRUNK, TRUNK_LIT, makeTree, outlineDistance, sampleTree, shadowOf, type Tree, type TreeShape } from '../pixel/canopy';
 import { hexToRgba, mix, type RGBA } from '../pixel/palette';
 import type { Painter } from './painter';
 import type { MapStyle } from './styles';
@@ -44,6 +44,7 @@ type CanopyColors = {
   /** Deep shadow → highlight, five steps; shadows lean cool, highlights warm. */
   ramp: RGBA[];
   trunk: RGBA;
+  trunkLight: RGBA;
   /** Ground colour under a crown's cast shadow. */
   shadow: RGBA;
 };
@@ -61,7 +62,7 @@ function canopyColors(kind: VegetationKind, style: MapStyle, override?: string):
   const deep = mix(dark, ink, 0.5);
   const light = mix(fill, warm, 0.38);
   const ramp = [deep, dark, fill, light, mix(light, hexToRgba('#fffbe0'), 0.5)];
-  return { light, fill, dark, edge: mix(dark, ink, 0.45), ink, ramp, trunk: mix(ink, hexToRgba('#6b5438'), 0.5), shadow: mix(dark, ink, 0.3) };
+  return { light, fill, dark, edge: mix(dark, ink, 0.45), ink, ramp, trunk: mix(ink, hexToRgba('#6b5438'), 0.5), trunkLight: mix(hexToRgba('#6b5438'), hexToRgba('#c9a97a'), 0.45), shadow: mix(dark, ink, 0.3) };
 }
 
 const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5].map((v) => (v + 0.5) / 16);
@@ -191,14 +192,202 @@ function lineField(coords: [number, number][], marginDeg: number): GeoGrid {
   return { ...g, data: gridDistance(g, (i) => m[i] === 1) };
 }
 
+/** Chamfer distance (radians) that also remembers which seed texel is nearest to each texel. */
+function gridNearest(g: GridShape, seed: Int32Array): { dist: Float32Array; near: Int32Array } {
+  const { w, h } = g;
+  const d = new Float32Array(w * h), near = seed.slice();
+  for (let i = 0; i < d.length; i++) d[i] = seed[i] >= 0 ? 0 : 1e9;
+  const dr = g.d / DEG;
+  const wx = new Float32Array(h), wd = new Float32Array(h);
+  for (let y = 0; y < h; y++) {
+    wx[y] = Math.max(0.01, Math.cos((g.y1 - y * g.d) / DEG)) * dr;
+    wd[y] = Math.hypot(wx[y], dr);
+  }
+  const relax = (i: number, j: number, cost: number) => {
+    const v = d[j] + cost;
+    if (v < d[i]) {
+      d[i] = v;
+      near[i] = near[j];
+    }
+  };
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (x > 0) relax(i, i - 1, wx[y]);
+      if (y > 0) {
+        relax(i, i - w, dr);
+        if (x > 0) relax(i, i - w - 1, wd[y]);
+        if (x < w - 1) relax(i, i - w + 1, wd[y]);
+      }
+    }
+  }
+  for (let y = h - 1; y >= 0; y--) {
+    for (let x = w - 1; x >= 0; x--) {
+      const i = y * w + x;
+      if (x < w - 1) relax(i, i + 1, wx[y]);
+      if (y < h - 1) {
+        relax(i, i + w, dr);
+        if (x < w - 1) relax(i, i + w + 1, wd[y]);
+        if (x > 0) relax(i, i + w - 1, wd[y]);
+      }
+    }
+  }
+  return { dist: d, near };
+}
+
+/**
+ * A river as a field: distance to its course, plus, for the nearest point of the course, how far
+ * down the river it is (0 source … 1 mouth) and the height of the river bed there. The bed is the
+ * terrain along the course with its low points carried downstream (a running minimum, lightly
+ * smoothed), so water never runs uphill: ridges the course crosses become gorges, hollows beside
+ * it can fill.
+ */
+interface RiverField extends GeoGrid {
+  /** Position along the river (0 source … 1 mouth) and bed height of the nearest course point, blurred smooth. */
+  t: Float32Array;
+  bed: Float32Array;
+  /** Mouth width and how far the valley reaches, radians. */
+  width: number;
+  reach: number;
+}
+
+const SEA_FLOOR = 0.05;
+
+function riverField(coords: [number, number][], marginDeg: number, widthRad: number, base: (lon: number, lat: number) => number): RiverField {
+  const g = gridAround({ type: 'LineString', coordinates: coords }, marginDeg);
+  const cos = Math.max(0.1, Math.cos(coords[Math.floor(coords.length / 2)][1] / DEG));
+  // Walk the course in steps of half a texel, reading the terrain under it.
+  const along: { lon: number; lat: number; s: number }[] = [];
+  let total = 0;
+  for (let i = 0; i + 1 < coords.length; i++) {
+    const [a, b] = [coords[i], coords[i + 1]];
+    const len = Math.hypot((b[0] - a[0]) * cos, b[1] - a[1]);
+    const steps = Math.max(1, Math.ceil((len / g.d) * 2));
+    for (let k = 0; k < steps; k++) along.push({ lon: a[0] + ((b[0] - a[0]) * k) / steps, lat: a[1] + ((b[1] - a[1]) * k) / steps, s: total + (len * k) / steps });
+    total += len;
+  }
+  const last = coords[coords.length - 1];
+  along.push({ lon: last[0], lat: last[1], s: total });
+  let bed = along.map((a) => base(a.lon, a.lat));
+  const downhill = (v: number[]) => {
+    let low = Infinity;
+    return v.map((x) => (low = Math.min(low, x)));
+  };
+  bed = downhill(bed);
+  // Smooth the stair-steps of the running minimum, then make sure it still never rises.
+  const win = Math.max(2, Math.round(along.length / 40));
+  bed = downhill(bed.map((_, i) => {
+    let sum = 0, n = 0;
+    for (let k = Math.max(0, i - win); k <= Math.min(bed.length - 1, i + win); k++, n++) sum += bed[k];
+    return sum / n;
+  }));
+  bed[bed.length - 1] = Math.min(bed[bed.length - 1], SEA_FLOOR);
+  const seed = new Int32Array(g.w * g.h).fill(-1);
+  const ts: number[] = [], beds: number[] = [];
+  along.forEach((a, i) => {
+    let l = a.lon - g.lon0;
+    l -= 360 * Math.round(l / 360);
+    const x = Math.round((l - g.x0) / g.d), y = Math.round((g.y1 - a.lat) / g.d);
+    if (x < 0 || y < 0 || x >= g.w || y >= g.h || seed[y * g.w + x] >= 0) return;
+    seed[y * g.w + x] = ts.length;
+    ts.push(total > 0 ? a.s / total : 0);
+    beds.push(bed[i]);
+  });
+  const { dist, near } = gridNearest(g, seed);
+  // Values of the nearest course point change in steps where two points' areas meet; blur them
+  // so valleys have no seams.
+  const tg = new Float32Array(g.w * g.h), bg = new Float32Array(g.w * g.h);
+  for (let i = 0; i < near.length; i++) {
+    const k = near[i];
+    if (k >= 0) {
+      tg[i] = ts[k];
+      bg[i] = beds[k];
+    }
+  }
+  // Wide enough to round off the straight, axis-aligned lines where the nearest course point
+  // changes (a distance field built on a grid has them), or ponds and marsh end in L-shaped corners.
+  const radius = Math.max(3, Math.round(g.w / 40));
+  blur(tg, g.w, g.h, radius);
+  blur(bg, g.w, g.h, radius);
+  return { ...g, data: dist, t: tg, bed: bg, width: widthRad, reach: (marginDeg / DEG) * 0.9 };
+}
+
+/**
+ * Distance from the sea (radians) over the land, -1 elsewhere. One grid per landmass, each sized
+ * to fit it: a single world-sized grid has texels ~0.18° across, so an island a few degrees wide is
+ * a handful of texels and every contour drawn from the field is a staircase of horizontal, vertical
+ * and diagonal runs (the L-shaped ridges, valleys and ponds).
+ */
+class CoastField {
+  private grids: GeoGrid[] = [];
+
+  constructor(land: GeoPermissibleObjects) {
+    const polygons = (land as { type: string; coordinates: unknown[] }).coordinates as [number, number][][][] | undefined;
+    for (const rings of polygons ?? []) {
+      if (rings.length && rings[0].length >= 4) this.grids.push(coastGrid({ type: 'Polygon', coordinates: rings }));
+    }
+  }
+
+  at(lon: number, lat: number): number {
+    let best = -1;
+    for (const g of this.grids) {
+      const d = sample(g, lon, lat, -1);
+      if (d > best) best = d;
+    }
+    return best;
+  }
+}
+
+/** Target texel size of a landmass's coast grid, degrees: ~2 km on an Earth-sized planet. */
+const COAST_TEXEL = 0.02;
+
+function coastGrid(poly: GeoPermissibleObjects): GeoGrid {
+  const [[lonA, latA], [lonB, latB]] = geoBounds(poly as Parameters<typeof geoBounds>[0]);
+  const extent = Math.max(lonA <= lonB ? lonB - lonA : lonB + 360 - lonA, latB - latA);
+  const g = gridAround(poly, 0.05 + extent * 0.03, Math.round(Math.min(640, Math.max(48, extent / COAST_TEXEL))));
+  const m = rasterize(g, (ctx, path) => {
+    ctx.beginPath();
+    path(poly);
+    ctx.fill('evenodd');
+  });
+  const din = gridDistance(g, (i) => !m[i]);
+  const data = new Float32Array(m.length);
+  for (let i = 0; i < m.length; i++) data[i] = m[i] ? din[i] : -1;
+  return { ...g, data };
+}
+
+/** Two passes of a separable box blur (≈ a gaussian) in place. */
+function blur(a: Float32Array, w: number, h: number, r: number): void {
+  const n = Math.max(w, h);
+  const tmp = new Float32Array(n), run = new Float64Array(n + 1);
+  // Running sums make a wide window as cheap as a narrow one.
+  const line = (len: number, at: (i: number) => number, put: (i: number, v: number) => void) => {
+    for (let i = 0; i < len; i++) run[i + 1] = run[i] + at(i);
+    for (let i = 0; i < len; i++) {
+      const lo = Math.max(0, i - r), hi = Math.min(len - 1, i + r);
+      tmp[i] = (run[hi + 1] - run[lo]) / (hi - lo + 1);
+    }
+    for (let i = 0; i < len; i++) put(i, tmp[i]);
+  };
+  for (let pass = 0; pass < 2; pass++) {
+    for (let y = 0; y < h; y++) line(w, (x) => a[y * w + x], (x, v) => (a[y * w + x] = v));
+    for (let x = 0; x < w; x++) line(h, (y) => a[y * w + x], (y, v) => (a[y * w + x] = v));
+  }
+}
+
 /** Bilinear sample, or `outside` beyond the grid. */
 function sample(g: GeoGrid, lon: number, lat: number, outside: number): number {
+  return sampleData(g, g.data, lon, lat, outside);
+}
+
+/** Bilinear sample of any array laid out like the grid. */
+function sampleData(g: GridShape, data: Float32Array, lon: number, lat: number, outside: number): number {
   let l = lon - g.lon0;
   l -= 360 * Math.round(l / 360);
   const fx = (l - g.x0) / g.d, fy = (g.y1 - lat) / g.d;
   if (fx < 0 || fy < 0 || fx > g.w - 1 || fy > g.h - 1) return outside;
   const x = Math.min(g.w - 2, Math.floor(fx)), y = Math.min(g.h - 2, Math.floor(fy));
-  const tx = fx - x, ty = fy - y, i = y * g.w + x, D = g.data;
+  const tx = fx - x, ty = fy - y, i = y * g.w + x, D = data;
   return (D[i] * (1 - tx) + D[i + 1] * tx) * (1 - ty) + (D[i + g.w] * (1 - tx) + D[i + g.w + 1] * tx) * ty;
 }
 
@@ -230,33 +419,23 @@ interface ReliefField {
  * built once per edit of that item — panning and zooming never rebuild them.
  */
 class TerrainFields {
-  coast: GeoGrid | null = null;
+  coast: CoastField | null = null;
   ranges: RangeField[] = [];
   reliefs: ReliefField[] = [];
   lifts: { amount: number; field: GeoGrid }[] = [];
-  rivers: GeoGrid[] = [];
+  rivers: RiverField[] = [];
   /** Changes whenever any field changes. */
   version = 0;
   private built = new Map<string, { key: string; bounds: Bounds; value: unknown }>();
   private landKey = '';
 
   /** Rebuild what changed; returns the areas whose terrain changed (for tile invalidation). */
-  update(doc: MapDoc, cache: GeometryCache): Bounds[] {
+  update(doc: MapDoc, cache: GeometryCache, bed: (lon: number, lat: number) => number): Bounds[] {
     const dirty: Bounds[] = [];
     const landKey = doc.seed + '|' + doc.items.filter((i) => i.kind === 'land').map((i) => `${i.id}:${i.rev}`).join(',');
     if (landKey !== this.landKey) {
       this.landKey = landKey;
-      const land = cache.land(doc, 0);
-      const g: GridShape = { lon0: 0, x0: -180, y1: 90, d: 360 / 2048, w: 2049, h: 1025 };
-      const m = rasterize(g, (ctx, path) => {
-        ctx.beginPath();
-        path(land.geo);
-        ctx.fill('evenodd');
-      });
-      const din = gridDistance(g, (i) => !m[i]);
-      const data = new Float32Array(m.length);
-      for (let i = 0; i < m.length; i++) data[i] = m[i] ? din[i] : -1;
-      this.coast = { ...g, data };
+      this.coast = new CoastField(cache.land(doc, 0).geo);
       dirty.push([-180, -90, 540, 90]);
     }
     const seen = new Set<string>();
@@ -300,12 +479,16 @@ class TerrainFields {
         const poly = areaPolygon(cache.shape(item, doc.seed));
         const field = get(item, `${item.rev}|${doc.seed}`, () => boundsOf(poly, 2), () => areaField(poly, 2, 384));
         this.lifts.push({ amount: item.elevation, field });
-      } else if (item.kind === 'river' && item.path.nodes.length >= 2) {
-        const geo = cache.river(doc, item);
-        const coords = lineToLonLat(geo.main);
-        const margin = 1.5 + item.width * 3;
-        this.rivers.push(get(item, `${item.rev}|${doc.seed}|${coords.length}|${coords[Math.floor(coords.length / 2)]}`, () => boundsOf({ type: 'LineString', coordinates: coords }, margin), () => lineField(coords, margin)));
       }
+    }
+    // Rivers last: their bed follows the terrain the other items make (and are rebuilt when it changes).
+    const terrainSig = landKey + '|' + doc.items.filter((i) => i.kind === 'mountains' || i.kind === 'relief').map((i) => `${i.id}:${i.rev}`).join(',');
+    for (const item of doc.items) {
+      if (item.kind !== 'river' || item.path.nodes.length < 2) continue;
+      const coords = lineToLonLat(cache.river(doc, item).main);
+      const margin = 4.5 + item.width * 3;
+      const key = `${item.rev}|${doc.seed}|${coords.length}|${coords[Math.floor(coords.length / 2)]}|${terrainSig}`;
+      this.rivers.push(get(item, key, () => boundsOf({ type: 'LineString', coordinates: coords }, margin), () => riverField(coords, margin, item.width * RAD, bed)));
     }
     for (const [id, v] of this.built) {
       if (!seen.has(id)) {
@@ -327,9 +510,24 @@ interface Tile {
   /** Terrain height and (height − snow line) per texel, (TS+1)² with shared edges. */
   h: Float32Array;
   sd: Float32Array;
+  /** Standing water above the ground (WET_SCALE per unit height) and marsh wetness (0–255 = 0–1). */
+  wet: Uint8Array;
+  marsh: Uint8Array;
   z: number;
   used: number;
 }
+
+/** What one point of terrain holds besides its height. */
+interface Wet {
+  /** Depth of standing water over the ground: lakes, bays and hollows by a river. */
+  w: number;
+  /** How marshy the ground is, 0–1. */
+  m: number;
+}
+const WET_SCALE = 500;
+/** Land lower than this is under water. */
+const SEA_LEVEL = -0.03;
+const FLOODED = 0.002;
 
 const tileKey = (z: number, tx: number, ty: number) => (z * 4194304 + tx) * 2097152 + ty;
 
@@ -389,15 +587,18 @@ class HeightTiles {
     const lon0 = -180 + tx * deg, lat1 = 90 - ty * deg;
     const level = detailLevel(1 / ((step / DEG) * 1.25));
     const h = new Float32Array(TEX * TEX), sd = new Float32Array(TEX * TEX).fill(-9);
+    const wet = new Uint8Array(TEX * TEX), marsh = new Uint8Array(TEX * TEX);
     for (let j = 0; j < TEX; j++) {
       const lat = lat1 - j * step;
       for (let i = 0; i < TEX; i++) {
         const r = this.heightAt(lon0 + i * step, lat, level);
         h[j * TEX + i] = r.h;
         sd[j * TEX + i] = r.sd;
+        wet[j * TEX + i] = Math.min(255, Math.round(r.w * WET_SCALE));
+        marsh[j * TEX + i] = Math.round(r.m * 255);
       }
     }
-    this.tiles.set(tileKey(z, tx, ty), { h, sd, z, used: ++this.clock });
+    this.tiles.set(tileKey(z, tx, ty), { h, sd, wet, marsh, z, used: ++this.clock });
     if (this.tiles.size > 900) {
       const old = [...this.tiles.entries()].sort((a, b) => a[1].used - b[1].used).slice(0, 200);
       for (const [k] of old) this.tiles.delete(k);
@@ -407,9 +608,12 @@ class HeightTiles {
   private last: { z: number; want: number; tile: Tile; tx: number; ty: number; lon0: number; lat1: number; deg: number } | null = null;
 
   /** Height from the finest cached tile at or above level `z`; null if none is cached. */
-  sample(z: number, lon: number, lat: number): { h: number; sd: number; exact: boolean } | null {
+  sample(z: number, lon: number, lat: number): { h: number; sd: number; w: number; m: number; exact: boolean } | null {
     const L = this.last;
-    if (L && L.want === z && lat <= L.lat1 && lat >= L.lat1 - L.deg) {
+    // Only reuse a tile of exactly the wanted level. A borrowed coarser one may have been replaced
+    // by the real tile since, and reusing it paints whole lon/lat boxes with coarse data: seams
+    // along straight vertical and horizontal lines.
+    if (L && L.z === z && lat <= L.lat1 && lat >= L.lat1 - L.deg) {
       let l = lon - L.lon0;
       l -= 360 * Math.floor(l / 360);
       if (l <= L.deg && this.tiles.get(tileKey(L.z, L.tx, L.ty)) === L.tile) return this.read(L.tile, L.deg, l, L.lat1 - lat, L.z === z);
@@ -429,18 +633,18 @@ class HeightTiles {
   }
 
   /** Bilinear read at (dLon, dLat) degrees from a tile's north-west corner. */
-  private read(t: Tile, deg: number, dLon: number, dLat: number, exact: boolean): { h: number; sd: number; exact: boolean } {
+  private read(t: Tile, deg: number, dLon: number, dLat: number, exact: boolean): { h: number; sd: number; w: number; m: number; exact: boolean } {
     const fx = Math.min(TS - 1e-6, (dLon / deg) * TS), fy = Math.min(TS - 1e-6, Math.max(0, (dLat / deg) * TS));
     const x = Math.floor(fx), y = Math.floor(fy), ax = fx - x, ay = fy - y, i = y * TEX + x;
-    const bl = (A: Float32Array) => (A[i] * (1 - ax) + A[i + 1] * ax) * (1 - ay) + (A[i + TEX] * (1 - ax) + A[i + TEX + 1] * ax) * ay;
-    return { h: bl(t.h), sd: bl(t.sd), exact };
+    const bl = (A: Float32Array | Uint8Array) => (A[i] * (1 - ax) + A[i + 1] * ax) * (1 - ay) + (A[i + TEX] * (1 - ax) + A[i + TEX + 1] * ax) * ay;
+    return { h: bl(t.h), sd: bl(t.sd), w: bl(t.wet) / WET_SCALE, m: bl(t.marsh) / 255, exact };
   }
 
-  /** Terrain height (and height above the snow line) at a geographic point. */
-  heightAt(lon: number, lat: number, level: number): { h: number; sd: number } {
+  /** The terrain the rivers start from: low ground plus relief and mountains, before any river cuts into it. */
+  private parts(lon: number, lat: number, level: number): { h: number; mountain: number; snow: number; px: number; py: number; pz: number } | null {
     const F = this.fields;
-    const coast = F.coast ? sample(F.coast, lon, lat, -1) : -1;
-    if (coast < 0) return { h: 0, sd: -9 };
+    const coast = F.coast ? F.coast.at(lon, lat) : -1;
+    if (coast < 0) return null;
     const la = lat / DEG, lo = lon / DEG, c = Math.cos(la);
     const px = c * Math.sin(lo), py = Math.sin(la), pz = c * Math.cos(lo);
     const inland = 1 - Math.exp(-coast / 0.06);
@@ -473,14 +677,75 @@ class HeightTiles {
         snow = R.item.height * (1.3 - R.item.snow * 1.4);
       }
     }
-    // Rivers carve valleys, deepest through mountains.
-    let river = 9;
-    for (const g of F.rivers) river = Math.min(river, sample(g, lon, lat, 9));
-    const valley = smooth(0, 0.014, river);
-    let out = h * (0.8 + 0.2 * valley) + mountain * (0.2 + 0.8 * valley);
+    return { h, mountain, snow, px, py, pz };
+  }
+
+  /** Height of the river bed at a point if a river ran there (the terrain, cut down a little, more under mountains). */
+  bedBase(lon: number, lat: number): number {
+    const p = this.parts(lon, lat, 0);
+    return p ? 0.8 * p.h + 0.2 * p.mountain : 0;
+  }
+
+  /**
+   * Erosion. Rivers cut valleys: a flat floor just above the river bed, with the terrain pulled
+   * towards it less and less — a short steep fall-off under mountains (a gorge), a long gentle one
+   * on lowland (a floodplain) — and valleys widen downstream. Mountains are also dissected by
+   * ravines, deep and plentiful on the flanks near a river and faint elsewhere.
+   */
+  private erode(out: number, mountain: number, lon: number, lat: number, px: number, py: number, pz: number, wet: Wet): number {
+    const mt = smooth(0.12, 0.55, mountain);
+    let near = 0, floor = 0;
+    for (const R of this.fields.rivers) {
+      const d = sample(R, lon, lat, 9);
+      if (d > R.reach) continue;
+      const t = sampleData(R, R.t, lon, lat, 0), bed = sampleData(R, R.bed, lon, lat, 0);
+      const channel = R.width * (0.1 + 0.9 * Math.pow(t, 0.8)) * 0.5;
+      const valleyFloor = bed + 0.004;
+      const flat = channel * (1.4 + 2.5 * (1 - mt)) + 0.0015;
+      // Everything fades out by `reach`, the edge of the river's field. Past it the river is
+      // ignored, so a longer fall-off would end in a hard edge: a polygon of straight runs whose
+      // corners are the L shapes in the ground.
+      const fall = Math.min((0.07 - 0.045 * mt) * (1 + 0.8 * t), R.reach - flat);
+      if (fall <= 0) continue;
+      // Water seeps into ground lower than the river beside it (a hollow fills like a pond), and
+      // low flat ground close to a river stays damp.
+      const touching = 1 - smooth(flat, flat + fall * 0.8, d);
+      if (touching > 0) {
+        const below = bed + 0.002 - out;
+        if (below > 0) wet.w = Math.max(wet.w, below * touching);
+        else if (mt < 0.5) {
+          const damp = touching * (1 - smooth(0.12, 0.3, out)) * (1 - mt * 2) * smooth(-0.25, 0.35, this.hills.fbm(px * 40, py * 40, pz * 40, 2));
+          wet.m = Math.max(wet.m, 0.7 * damp);
+        }
+      }
+      if (out > valleyFloor) out = valleyFloor + (out - valleyFloor) * smooth(flat, flat + fall, d);
+      const close = smooth(Math.min(0.1, R.reach), 0.02, d);
+      if (close > near) {
+        near = close;
+        floor = valleyFloor;
+      }
+    }
+    if (mt > 0.05) {
+      const n = this.hills.fbm(px * 70, py * 70, pz * 70, 2);
+      const gully = Math.max(0, 1 - Math.abs(n) * 5);
+      const bottom = near > 0 ? floor : 0.06;
+      out -= (0.035 + 0.065 * near) * mt * gully * gully * Math.min(1, Math.max(0, out - bottom) * 4);
+    }
+    return out;
+  }
+
+  /** Terrain height (and height above the snow line) at a geographic point. */
+  heightAt(lon: number, lat: number, level: number): { h: number; sd: number; w: number; m: number } {
+    const p = this.parts(lon, lat, level);
+    if (!p) return { h: 0, sd: -9, w: 0, m: 0 };
+    const wet: Wet = { w: 0, m: 0 };
+    let out = this.erode(p.h + p.mountain, p.mountain, lon, lat, p.px, p.py, p.pz, wet);
+    // Land the elevation tool has lowered below sea level is flooded; its shores are marshy.
+    if (out < SEA_LEVEL) wet.w = Math.max(wet.w, SEA_LEVEL - out);
+    else if (out < SEA_LEVEL + 0.03) wet.m = Math.max(wet.m, 0.8 * (1 - (out - SEA_LEVEL) / 0.03));
     // Soft floor: deep valleys flatten out gently instead of being cut off.
     if (out < 0.06) out = 0.06 - (0.06 - out) * 0.25;
-    return { h: out, sd: out - snow };
+    return { h: out, sd: out - p.snow, w: wet.w, m: wet.m };
   }
 }
 
@@ -503,17 +768,37 @@ interface Scatter {
 }
 
 /** `trees` names the tree shapes a mass is made of; conifers in a mixed wood come in stands. */
-const VEG: Record<VegetationKind, { trees: TreeShape[] | null; plant?: 'shrub' | 'grass'; keep: number; conifers?: number }> = {
-  broadleaf: { trees: ['round'], keep: 1 },
-  conifer: { trees: ['cone'], keep: 1 },
-  mixed: { trees: ['round', 'cone'], keep: 1, conifers: 0.35 },
-  jungle: { trees: ['jungle'], keep: 1 },
-  shrubs: { trees: ['shrub'], keep: 0.7 },
-  grass: { trees: null, plant: 'grass', keep: 0.5 },
+const VEG: Record<VegetationKind, { trees: TreeShape[] | null; plant?: 'shrub' | 'grass'; keep: number; conifers?: number; cover: number }> = {
+  broadleaf: { trees: ['round'], keep: 1, cover: 1 },
+  conifer: { trees: ['cone'], keep: 1, cover: 1 },
+  mixed: { trees: ['round', 'cone'], keep: 1, conifers: 0.35, cover: 1 },
+  jungle: { trees: ['jungle'], keep: 1, cover: 1 },
+  shrubs: { trees: ['shrub'], keep: 0.7, cover: 0.55 },
+  grass: { trees: null, plant: 'grass', keep: 0.5, cover: 0.4 },
 };
 
-/** Trees across a vegetation area at scale 1 (more, smaller trees read as woodland, not icons). */
-const TREES_ACROSS = 36;
+/**
+ * Distance between trees on the map, radians of arc (scaled by the area's Size and Density). Trees
+ * have a fixed size, so they grow as you zoom in; from far away they are finer than a pixel and the
+ * wood is drawn as a canopy mass instead, with trees fading in once they are big enough to read.
+ */
+const TREE_SPACING = 0.0025;
+/** Below this spacing (art pixels) no individual trees are drawn, only the canopy. */
+const MIN_TREE_SPACING = 2.6;
+
+/** What a frame knows about each vegetation area, for the canopy mass drawn under and beyond its trees. */
+interface FrameForest {
+  colors: CanopyColors;
+  cover: number;
+  /** Noise frequencies (per unit of sphere): density patches over the whole area, mottling at tree scale. */
+  fq: number;
+  mf: number;
+  /** Mass is darker as trees become visible, so crowns stand out against the forest floor. */
+  dim: number;
+  treeLine: number;
+  wood: Fbm;
+  mottle: Fbm;
+}
 
 interface PlacedTree {
   tree: Tree;
@@ -561,21 +846,105 @@ function screenMask(p: Painter, w: number, h: number, art: number, geo: GeoPermi
   return out;
 }
 
+/** Distance (chamfer, 3 per pixel) from each masked pixel to the mask's edge; the screen's border is not an edge. */
+function insideDistance(mask: Uint8Array, w: number, h: number, out: Uint8Array): void {
+  const d = new Uint8Array(w * h);
+  for (let i = 0; i < d.length; i++) d[i] = mask[i] ? 255 : 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (!mask[i]) continue;
+      let v = d[i];
+      if (x > 0) v = Math.min(v, d[i - 1] + 3);
+      if (y > 0) {
+        v = Math.min(v, d[i - w] + 3);
+        if (x > 0) v = Math.min(v, d[i - w - 1] + 4);
+        if (x < w - 1) v = Math.min(v, d[i - w + 1] + 4);
+      }
+      d[i] = Math.min(255, v);
+    }
+  }
+  for (let y = h - 1; y >= 0; y--) {
+    for (let x = w - 1; x >= 0; x--) {
+      const i = y * w + x;
+      if (!mask[i]) continue;
+      let v = d[i];
+      if (x < w - 1) v = Math.min(v, d[i + 1] + 3);
+      if (y < h - 1) {
+        v = Math.min(v, d[i + w] + 3);
+        if (x < w - 1) v = Math.min(v, d[i + w + 1] + 4);
+        if (x > 0) v = Math.min(v, d[i + w - 1] + 4);
+      }
+      d[i] = Math.min(255, v);
+    }
+  }
+  for (let i = 0; i < d.length; i++) if (mask[i]) out[i] = d[i];
+}
+
+/** The part of the world the screen shows, padded: latitude range and a longitude interval (degrees). */
+interface ViewBounds {
+  lon0: number;
+  lon1: number;
+  lat0: number;
+  lat1: number;
+}
+
+function viewBounds(p: Painter): ViewBounds {
+  const W = p.width, H = p.height, m = 80;
+  let lat0 = 90, lat1 = -90, lonC = NaN, dMin = 0, dMax = 0, seen = 0;
+  for (let j = 0; j <= 10; j++) {
+    for (let i = 0; i <= 10; i++) {
+      const x = -m + ((W + 2 * m) * i) / 10, y = -m + ((H + 2 * m) * j) / 10;
+      const g = p.projection.invert?.([x, y]);
+      if (!g || !Number.isFinite(g[0]) || !Number.isFinite(g[1]) || Math.abs(g[1]) > 90) continue;
+      const back = p.projection(g as [number, number]);
+      // Inverse projections happily extrapolate past the edge of the world.
+      if (!back || Math.hypot(back[0] - x, back[1] - y) > 2) continue;
+      seen++;
+      lat0 = Math.min(lat0, g[1]);
+      lat1 = Math.max(lat1, g[1]);
+      if (Number.isNaN(lonC)) lonC = g[0];
+      const dl = ((g[0] - lonC + 540) % 360) - 180;
+      dMin = Math.min(dMin, dl);
+      dMax = Math.max(dMax, dl);
+    }
+  }
+  if (!seen) return { lon0: -180, lon1: 180, lat0: -90, lat1: 90 };
+  const padLat = (lat1 - lat0) * 0.1 + 0.3;
+  lat0 = Math.max(-90, lat0 - padLat);
+  lat1 = Math.min(90, lat1 + padLat);
+  const padLon = (dMax - dMin) * 0.1 + 0.3 / Math.max(0.05, Math.cos(Math.max(Math.abs(lat0), Math.abs(lat1)) / DEG));
+  if (lat0 < -80 || lat1 > 80 || dMax - dMin + 2 * padLon > 340) return { lon0: -180, lon1: 180, lat0, lat1 };
+  return { lon0: lonC + dMin - padLon, lon1: lonC + dMax + padLon, lat0, lat1 };
+}
+
 /** Geo-anchored jittered points about `spacingRad` apart over a region (steps a quarter-octave apart). */
-function lattice(p: Painter, poly: GeoPermissibleObjects, spacingRad: number, salt: number): { pts: { x: number; y: number; cell: number; at: [number, number] }[]; step: number } {
+function lattice(p: Painter, poly: GeoPermissibleObjects, spacingRad: number, salt: number, view?: ViewBounds): { pts: { x: number; y: number; cell: number; at: [number, number] }[]; step: number } {
   const level = Math.max(0, Math.ceil(4 * Math.log2(spacingRad / 0.00025)));
   let step = 0.00025 * 2 ** (level / 4);
   const [[lonA, latA], [lonB, latB]] = geoBounds(poly as Parameters<typeof geoBounds>[0]);
   const pts: { x: number; y: number; cell: number; at: [number, number] }[] = [];
+  // Only the part of the area the screen shows needs points.
+  let lat0 = latA, lat1 = latB, span = lonA <= lonB ? [lonA, lonB] : [lonA, lonB + 360];
+  if (view) {
+    lat0 = Math.max(lat0, view.lat0);
+    lat1 = Math.min(lat1, view.lat1);
+    if (lat0 > lat1) return { pts, step };
+    if (view.lon1 - view.lon0 < 359) {
+      const shift = 360 * Math.round(((span[0] + span[1]) / 2 - (view.lon0 + view.lon1) / 2) / 360);
+      const i0 = Math.max(span[0], view.lon0 + shift), i1 = Math.min(span[1], view.lon1 + shift);
+      if (i0 > i1) return { pts, step };
+      span = [i0, i1];
+    }
+  }
   for (let tries = 0; tries < 6; tries++) {
     pts.length = 0;
-    const r0 = Math.floor((latA / DEG + Math.PI / 2) / step), r1 = Math.floor((latB / DEG + Math.PI / 2) / step);
+    const r0 = Math.floor((lat0 / DEG + Math.PI / 2) / step), r1 = Math.floor((lat1 / DEG + Math.PI / 2) / step);
     let count = 0;
     for (let r = r0; r <= r1 && count < 60000; r++) {
       const phi = -Math.PI / 2 + (r + 0.5) * step;
       const cols = Math.max(1, Math.floor((2 * Math.PI * Math.cos(phi)) / step));
       const colStep = (2 * Math.PI) / cols;
-      const span = lonA <= lonB ? [lonA, lonB] : [lonA, lonB + 360];
       const c0 = Math.floor((span[0] / DEG + Math.PI) / colStep) - 1, c1 = Math.ceil((span[1] / DEG + Math.PI) / colStep) + 1;
       for (let cc = c0; cc <= c1; cc++) {
         count++;
@@ -610,6 +979,11 @@ class TerrainFrame {
   private tintOf!: Uint8Array;
   private palettes: ReliefPalette[] = [];
   private trees: PlacedTree[] = [];
+  private forests: FrameForest[] = [];
+  /** Per pixel: the vegetation area (1-based index into `forests`) covering it, and the distance to its edge. */
+  private forestOf!: Uint8Array;
+  private edgeOf!: Uint8Array;
+  private waterColors!: { ramp: RGBA[]; rim: RGBA; marsh: RGBA; reed: RGBA };
   private scatter: Scatter[] = [];
   private tiles: [number, number, number, number][] = [];
   private next = 0;
@@ -638,7 +1012,18 @@ class TerrainFrame {
     this.land = screenMask(p, W, H, art, cache.land(doc, level).geo);
     if (!this.land.includes(1)) return void (this.empty = true);
     this.tintOf = new Uint8Array(W * H);
+    this.forestOf = new Uint8Array(W * H);
+    this.edgeOf = new Uint8Array(W * H);
     this.palettes = [reliefPalette(style)];
+    {
+      const sea = hexToRgba(style.sea), ink = hexToRgba(style.ink), land = hexToRgba(style.land);
+      this.waterColors = {
+        ramp: [mix(sea, land, 0.3), sea, mix(sea, ink, 0.2)],
+        rim: mix(ink, sea, 0.3),
+        marsh: mix(sea, hexToRgba('#6f8b5a'), 0.5),
+        reed: mix(ink, hexToRgba('#6f8b5a'), 0.45),
+      };
+    }
     for (const item of doc.items) {
       if (item.kind !== 'land' || item.op !== 'add' || !item.color || item.path.nodes.length < 3) continue;
       const m = screenMask(p, W, H, art, areaPolygon(cache.shape(item, doc.seed, level)));
@@ -658,7 +1043,7 @@ class TerrainFrame {
     return this.p.projection.invert!([(x + 0.5) * this.art, (y + 0.5) * this.art]) as [number, number] | null;
   }
 
-  private heightAt(g: [number, number]): { h: number; sd: number } {
+  private heightAt(g: [number, number]): { h: number; sd: number; w: number; m: number } {
     return this.heights.sample(this.z, g[0], g[1]) ?? this.heights.heightAt(g[0], g[1], 0);
   }
 
@@ -675,17 +1060,25 @@ class TerrainFrame {
     const poly = areaPolygon(outline);
     const fm = screenMask(p, W, H, art, poly);
     const colors = canopyColors(f.vegetation, style, f.color);
-    // About TREES_ACROSS crowns across the area whatever the zoom; never under 3 px (it simplifies).
+    // Trees have a fixed size on the map. Far away they are finer than a pixel: only the canopy mass
+    // is drawn, and trees fade in as they grow big enough to show their silhouettes.
     const scale = p.projection.scale();
     const extent = Math.sqrt(geoArea(poly));
-    const nominal = (extent / TREES_ACROSS) * f.scale;
-    const spacingRad = Math.max(nominal / Math.max(0.4, f.density), (3 * art) / scale);
-    const grid = lattice(p, poly, spacingRad, 5);
-    // Size plants from the grid's real step so neighbours overlap.
-    const spacing = (grid.step * scale) / art;
+    const spacingRad = (TREE_SPACING * f.scale) / Math.max(0.4, f.density);
+    const spacingArt = (spacingRad * scale) / art;
     const treeLine = 0.6 + 0.2 * f.height;
     const wood = noise(doc.seed, 'wood'), stands = noise(doc.seed, 'stands');
     const fq = 3.5 / Math.max(1e-3, extent);
+    this.addCanopy(fm, {
+      colors, cover: look.cover, fq, treeLine, wood, mottle: noise(doc.seed, 'canopy'),
+      mf: 1 / Math.max(2.2 * spacingRad, (4 * art) / scale),
+      dim: 0.18 * smooth(MIN_TREE_SPACING, 8, spacingArt),
+    });
+    // Quick frames (while moving) show the canopy only; the trees settle in once the view is still.
+    if (spacingArt < MIN_TREE_SPACING || art > this.inputs.pixelScale + 1e-6) return;
+    const grid = lattice(p, poly, spacingRad, 5, viewBounds(p));
+    // Size plants from the grid's real step so neighbours overlap.
+    const spacing = (grid.step * scale) / art;
     const edges = edgeDistances(f, grid.step, outline);
     for (const q of grid.pts) {
       const x = q.x / art, y = q.y / art, xi = Math.floor(x), yi = Math.floor(y);
@@ -708,7 +1101,8 @@ class TerrainFrame {
         let river = 9;
         for (const g of this.fields.rivers) river = Math.min(river, sample(g, q.at[0], q.at[1], 9));
         if (river < 0.004 + spacingRad * 0.3) continue;
-        if (this.heightAt(q.at).h > treeLine + (cellHash(q.cell, 1, 3) - 0.5) * 0.08) continue;
+        const ground = this.heightAt(q.at);
+        if (ground.w > FLOODED || ground.h > treeLine + (cellHash(q.cell, 1, 3) - 0.5) * 0.08) continue;
       }
       if (cellHash(q.cell, 11, 2) > look.keep) continue;
       const n = wood.fbm(ux * fq, uy * fq, uz * fq, 3);
@@ -727,7 +1121,7 @@ class TerrainFrame {
           shape = cellHash(q.cell, 3, 9) < Math.max(0.04, Math.min(0.96, look.conifers + 1.1 * stand)) ? 'cone' : 'round';
         } else shape = look.trees[Math.floor(cellHash(q.cell, 3, 9) * look.trees.length)];
         const r = spacing * (shape === 'cone' ? 1.0 : shape === 'jungle' ? 0.95 : shape === 'shrub' ? 0.85 : 0.8) * vary * size;
-        if (r < 1.2) continue;
+        if (r < 1.6 * (0.8 + 0.4 * cellHash(q.cell, 31, 6))) continue;
         const tone = (cellHash(q.cell, 8, 3) - 0.5) * 0.16 + 0.12 * n;
         this.trees.push({ tree: makeTree(x, y, r, shape, shape === 'shrub' ? 0.6 * f.height : f.height, q.cell, tone), colors });
       } else {
@@ -737,10 +1131,46 @@ class TerrainFrame {
     }
   }
 
+  /** Claim the pixels of a vegetation area for the canopy mass, and measure how far each is from the edge. */
+  private addCanopy(fm: Uint8Array, forest: FrameForest): void {
+    if (this.forests.length >= 255) return;
+    this.forests.push(forest);
+    const id = this.forests.length;
+    let any = false;
+    for (let i = 0; i < fm.length; i++) {
+      if (fm[i]) {
+        this.forestOf[i] = id;
+        any = true;
+      }
+    }
+    if (any) insideDistance(fm, this.W, this.H, this.edgeOf);
+  }
+
+  /**
+   * The wood as a mass, seen from afar: mottled canopy greens in a dither, thinning in glades and
+   * towards the edge, with a darker rim. Under visible trees it is their shaded forest floor.
+   * `edge` is how many pixels inside the outline the pixel is (1 = the outermost).
+   */
+  private massPixel(c: RGBA, f: FrameForest, x: number, y: number, dens: number, mottle: number, edge: number): RGBA {
+    // Dense where the wood is thick, bare in glades, with a narrow dithered transition between.
+    const dense = smooth(0.28, 0.72, Math.max(0, Math.min(1, 0.8 + 0.8 * dens)) * (0.5 + 0.5 * smooth(0, 3, edge)));
+    if (dense < 0.04) return c;
+    const lum = 0.46 + 0.3 * mottle + 0.1 * dens - f.dim;
+    const tone = f.colors.ramp[Math.max(1, Math.min(3, Math.floor(lum * 4 + (dither(x + 1, y + 2) - 0.5) * 0.7 + 0.5)))];
+    // Scrub and grass are a light tint over the ground, not a solid canopy.
+    if (f.cover < 0.9) return mix(c, tone, f.cover * dense * 0.8);
+    if (edge <= 1.01 && dense > 0.3) return f.colors.edge;
+    // Bare patches keep a faint green wash, so glades read as undergrowth, not speckle.
+    if (dither(x, y) >= dense) return mix(c, f.colors.ramp[2], 0.3 * dense);
+    return tone;
+  }
+
   private renderTile([x0, y0, x1, y1]: [number, number, number, number]): void {
     const { W, H, out } = this;
     const tw = x1 - x0 + 2, th = y1 - y0 + 2;
     const hs = new Float32Array(tw * th), sds = new Float32Array(tw * th).fill(-9);
+    const ws = new Float32Array(tw * th), ms = new Float32Array(tw * th);
+    const nds = new Float32Array(tw * th), nms = new Float32Array(tw * th);
     for (let ty = 0; ty < th; ty++) {
       const y = y0 - 1 + ty;
       if (y < 0 || y >= H) continue;
@@ -752,6 +1182,18 @@ class TerrainFrame {
         const r = this.heightAt(g);
         hs[ty * tw + tx] = r.h;
         sds[ty * tw + tx] = r.sd;
+        ws[ty * tw + tx] = r.w;
+        ms[ty * tw + tx] = r.m;
+        const fid = this.forestOf[y * W + x];
+        if (fid) {
+          const F = this.forests[fid - 1];
+          const [ux, uy, uz] = fromLonLat(g);
+          let river = 9;
+          for (const rg of this.fields.rivers) river = Math.min(river, sample(rg, g[0], g[1], 9));
+          // No canopy over rivers, standing water or above the tree line.
+          nds[ty * tw + tx] = river < 0.004 || r.h > F.treeLine ? -2 : F.wood.fbm(ux * F.fq, uy * F.fq, uz * F.fq, 3);
+          nms[ty * tw + tx] = F.mottle.fbm(ux * F.mf, uy * F.mf, uz * F.mf, 2);
+        }
       }
     }
     const E = 0.035, L = [-0.55, -0.55, 0.63];
@@ -775,12 +1217,30 @@ class TerrainFrame {
         if (sds[t] > (dither(x + 1, y) - 0.5) * 0.08) band = 4;
         const pal = this.palettes[this.tintOf[i]];
         let c = pal.bands[Math.min(4, band)];
+        const fid = this.forestOf[i];
+        if (fid && ws[t] <= FLOODED) c = this.massPixel(c, this.forests[fid - 1], x, y, nds[t], nms[t], this.edgeOf[i] / 3);
         c = step < 0 ? mix(c, pal.shadow, -step * 0.2) : step > 0 ? mix(c, pal.light, step * 0.18) : c;
+        if (ws[t] > FLOODED) c = this.waterPixel(x, y, ws[t], [ws[t - 1], ws[t + 1], ws[t - tw], ws[t + tw]], [this.land[i - 1], this.land[i + 1], this.land[i - W], this.land[i + W]]);
+        else if (ms[t] > 0.12) c = this.marshPixel(c, x, y, ms[t]);
         out.set(c, i * 4);
       }
     }
     this.drawTrees(x0, y0, x1, y1);
     this.drawScatter(x0, y0, x1, y1);
+  }
+
+  /** Standing water: three depth steps (dithered between), a shore line where it meets dry land. */
+  private waterPixel(x: number, y: number, depth: number, around: number[], isLand: number[]): RGBA {
+    const wp = this.waterColors;
+    for (let k = 0; k < 4; k++) if (isLand[k] && around[k] <= FLOODED) return wp.rim;
+    return wp.ramp[Math.max(0, Math.min(2, Math.floor(Math.min(2, depth * 22) + (dither(x, y) - 0.5) * 0.7 + 0.5)))];
+  }
+
+  /** Damp ground: the land colour pulled towards a murky green in a dither, with a few reed ticks. */
+  private marshPixel(c: RGBA, x: number, y: number, wetness: number): RGBA {
+    const wp = this.waterColors;
+    if (cellHash(x, y, 77) < 0.05 * wetness) return wp.reed;
+    return dither(x + 3, y) < wetness * 0.9 ? mix(c, wp.marsh, 0.55) : c;
   }
 
   /**
@@ -834,8 +1294,8 @@ class TerrainFrame {
           continue;
         }
         const { colors } = near[k];
-        if (lum[t] === TRUNK) {
-          out.set(colors.trunk, px);
+        if (lum[t] === TRUNK || lum[t] === TRUNK_LIT) {
+          out.set(lum[t] === TRUNK ? colors.trunk : colors.trunkLight, px);
           continue;
         }
         // Neighbours off the screen count as the same tree, so no rim runs along the frame.
@@ -843,7 +1303,7 @@ class TerrainFrame {
         let c: RGBA;
         if (up < 0 || left < 0 || right < 0 || down < 0) c = up < 0 || left < 0 ? mix(colors.dark, colors.edge, 0.5) : colors.edge;
         else if (up !== k && up < k) c = colors.ramp[0];
-        else c = colors.ramp[Math.max(0, Math.min(4, Math.floor(lum[t] * 4 + (dither(x, y) - 0.5) * 0.8 + 0.5)))];
+        else c = colors.ramp[Math.max(0, Math.min(4, Math.floor(lum[t] * 4 + (dither(x, y) - 0.5) * 0.45 + 0.5)))];
         out.set(c, px);
       }
     }
@@ -940,7 +1400,8 @@ export class TerrainLayer {
   /** Time and coarseness of the last quick frame (for tuning and checks). */
   lastQuick = { ms: 0, factor: 1 };
 
-  constructor(private requestRender: () => void) {}
+  /** `renderCost` says how long the map's last full redraw took (ms), so progress frames don't swamp a slow one. */
+  constructor(private requestRender: () => void, private renderCost: () => number = () => 0) {}
 
   /** True while following a change with quick frames (vectors can skip slow work too). */
   get moving(): boolean {
@@ -952,11 +1413,12 @@ export class TerrainLayer {
     if (!this.heights || this.seed !== doc.seed) {
       this.seed = doc.seed;
       this.fields = new TerrainFields();
-      this.fields.update(doc, cache);
-      this.heights = new HeightTiles(doc.seed, this.fields);
+      const heights = (this.heights = new HeightTiles(doc.seed, this.fields));
+      this.fields.update(doc, cache, (lon, lat) => heights.bedBase(lon, lat));
       return;
     }
-    if (!editing) this.heights.invalidate(this.fields.update(doc, cache));
+    const heights = this.heights;
+    if (!editing) heights.invalidate(this.fields.update(doc, cache, (lon, lat) => heights.bedBase(lon, lat)));
   }
 
   draw(p: Painter, inputs: TerrainInputs): void {
@@ -1024,7 +1486,7 @@ export class TerrainLayer {
         done = fine.step(Math.max(2, 8 - (performance.now() - t0)));
       }
       const now = performance.now();
-      if (done || (started && now - this.lastShown > 150)) {
+      if (done || (started && now - this.lastShown > Math.max(150, 3 * this.renderCost()))) {
         this.lastShown = now;
         this.requestRender();
       }
@@ -1039,6 +1501,23 @@ export class TerrainLayer {
     const frame = new TerrainFrame(p, inputs, this.heights!, this.fields, inputs.pixelScale);
     for (const [z, tx, ty] of frame.missingTiles()) this.heights!.compute(z, tx, ty);
     return frame.runAll();
+  }
+
+  /**
+   * Terrain height and distance from the sea at geographic points, for planning things on the map
+   * (where a river would flow). Brings the fields up to date with the document first.
+   */
+  probe(doc: MapDoc, cache: GeometryCache): { height(lon: number, lat: number): number; coastDistance(lon: number, lat: number): number } {
+    this.sync(doc, cache, false);
+    const heights = this.heights!, fields = this.fields;
+    return {
+      height: (lon, lat) => {
+        const r = heights.heightAt(lon, lat, 0);
+        return r.w > FLOODED ? 0 : r.h;
+      },
+      /** Radians from the nearest sea; negative off the land. */
+      coastDistance: (lon, lat) => (fields.coast ? fields.coast.at(lon, lat) : -1),
+    };
   }
 
   /** True once the view is shown at full detail (nothing left to refine). */

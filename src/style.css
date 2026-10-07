@@ -42,7 +42,7 @@ kbd { font: 11px var(--mono); color: var(--ink-soft); }
 #app {
   display: grid;
   grid-template-rows: 30px minmax(0, 1fr) 24px;
-  grid-template-columns: 56px minmax(0, 1fr) 270px;
+  grid-template-columns: minmax(0, 1fr) 270px;
   height: 100%;
 }
 
@@ -106,81 +106,26 @@ kbd { font: 11px var(--mono); color: var(--ink-soft); }
 .menu-items hr { border: 0; border-top: 1px solid var(--rule-light); margin: 3px 0; }
 .spacer { flex: 1; }
 
-/* ---------------------------------------------------------------- tools */
-
-#toolbox {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 8px 4px;
-  position: relative;
-  z-index: 20;
-  border-right: 1px solid #000;
-  /* the desk-top the tool trays are set into: dark leather */
-  background: #4a3d2d var(--grain);
-  box-shadow: 3px 0 6px rgba(20, 14, 8, 0.5), 8px 0 16px rgba(20, 14, 8, 0.25), inset -1px 0 0 rgba(255, 215, 150, 0.12);
-}
-/* a shallow wooden tray, lined with felt, holding a few tools */
-.tray {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 4px;
-  border: 1px solid #000;
-  background: #2e261c var(--grain);
-  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.75), inset 0 0 0 2px #6b573d, 0 1px 0 rgba(255, 215, 150, 0.2);
-}
-/* each tool is a small card / tab lying in the tray, every one at its own slight angle */
-.tool {
-  position: relative;
-  width: 39px;
-  height: 39px;
-  display: grid;
-  place-items: center;
-  padding: 0;
-  border: 1px solid var(--rule);
-  background: linear-gradient(135deg, var(--paper-light), var(--paper-dark));
-  color: var(--ink);
-  box-shadow: 0 1px 0 #8d7c58, 1px 3px 4px rgba(0, 0, 0, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.7);
-  cursor: default;
-  transition: transform 90ms ease-out, box-shadow 90ms ease-out;
-}
-.tool:nth-child(3n + 1) { rotate: -1.6deg; }
-.tool:nth-child(3n + 2) { rotate: 1.1deg; background: linear-gradient(135deg, #f0e6c8, #d6c9a4); }
-.tool:nth-child(3n) { rotate: -0.5deg; background: linear-gradient(135deg, #f7f1e1, #e2d8bd); }
-/* Pixel-art icons: 16×16 drawn at exactly 2×, no smoothing. */
-.tool .icon { width: 32px; height: 32px; image-rendering: pixelated; }
-.tool .icon-active, .tool.active .icon-normal { display: none; }
-.tool.active .icon-active { display: block; }
-.icon-letter { font: bold 15px var(--mono); }
-.tool kbd { position: absolute; right: 2px; bottom: 0; font-size: 9px; color: inherit; opacity: 0.55; }
-.tool:hover:not(.active) { box-shadow: 0 2px 0 #8d7c58, 1px 5px 6px rgba(0, 0, 0, 0.65), inset 0 1px 0 rgba(255, 255, 255, 0.85); }
-.tool:active { background: linear-gradient(135deg, #d6c9a4, #c8b98f); box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.55); transition-duration: 25ms; }
-/* the chosen tool stays pushed down into the tray: flat, dark, face below its neighbours */
-.tool.active {
-  rotate: 0deg;
-  border-color: #000;
-  background: linear-gradient(135deg, #2a2118, #1c160f);
-  color: var(--paper);
-  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.85), inset 0 0 0 1px rgba(176, 141, 74, 0.55);
-}
-.tool:focus-visible, .btn:focus-visible, .seg button:focus-visible, .well:focus-visible { outline: 2px solid var(--red); outline-offset: 2px; }
+.btn:focus-visible, .seg button:focus-visible, .well:focus-visible { outline: 2px solid var(--red); outline-offset: 2px; }
 
 /* ---------------------------------------------------------------- map */
 
-/* the table: planks of wood under a lamp, darkening toward the edges. --desk (the map's desk colour) tints it. */
+/* the table: a dark grey cutting mat with a faint measuring grid, speckle and a lamp glow.
+   --desk (the map's desk colour) tints it. */
 #viewport {
-  --wood: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='640' height='230'><filter id='g' x='0' y='0' width='100%' height='100%'><feTurbulence type='fractalNoise' baseFrequency='0.003 0.16' numOctaves='3' seed='7'/><feColorMatrix values='0 0 0 0 0.1  0 0 0 0 0.05  0 0 0 0 0.01  1.7 0 0 0 -0.62'/></filter><rect width='640' height='230' filter='url(%23g)'/><rect y='226' width='640' height='4' fill='black' opacity='0.45'/><rect y='225' width='640' height='1' fill='white' opacity='0.07'/></svg>");
+  --mat: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><g stroke='white' fill='none'><path d='M0 .5H200M0 40.5H200M0 80.5H200M0 120.5H200M0 160.5H200M.5 0V200M40.5 0V200M80.5 0V200M120.5 0V200M160.5 0V200' stroke-opacity='.045'/><path d='M0 20.5H200M0 60.5H200M0 100.5H200M0 140.5H200M0 180.5H200M20.5 0V200M60.5 0V200M100.5 0V200M140.5 0V200M180.5 0V200' stroke-opacity='.02'/><path d='M.5 0V200M0 .5H200' stroke-opacity='.11'/></g><g fill='white' fill-opacity='.14'><path d='M0 0h200v1H0z'/></g><g stroke='%23d9a441' stroke-opacity='.35' stroke-width='1'><path d='M100.5 94V106M94 100.5H106'/></g></svg>");
+  --speckle: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' seed='11'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.09 0'/></filter><rect width='180' height='180' filter='url(%23n)'/></svg>");
   position: relative;
   overflow: hidden;
   background:
-    radial-gradient(ellipse 70% 60% at 42% 38%, rgba(255, 226, 160, 0.2), transparent 70%),
-    radial-gradient(ellipse 85% 85% at 50% 50%, transparent 45%, rgba(0, 0, 0, 0.6) 100%),
-    var(--wood),
-    var(--desk, #5e432a);
+    radial-gradient(ellipse 70% 60% at 42% 38%, rgba(255, 245, 225, 0.1), transparent 70%),
+    radial-gradient(ellipse 85% 85% at 50% 50%, transparent 40%, rgba(0, 0, 0, 0.55) 100%),
+    var(--mat),
+    var(--speckle),
+    var(--desk, #2c2c2e);
   z-index: 0;
 }
-/* the map lies on the table as a sheet of paper and throws a shadow */
+/* the map lies on the mat as a sheet of paper and throws a shadow */
 .map-base { filter: drop-shadow(0 6px 5px rgba(0, 0, 0, 0.45)) drop-shadow(0 18px 24px rgba(0, 0, 0, 0.45)); }
 .map-base, .map-overlay { position: absolute; inset: 0; display: block; }
 .map-overlay { touch-action: none; }
@@ -271,23 +216,24 @@ input[type='text']:focus, input[type='number']:focus, select:focus { outline: 1p
 .btn:active { background: linear-gradient(#1c160f, #342a1e); color: var(--paper); box-shadow: var(--key-down); transform: translateY(1px); transition-duration: 25ms; }
 .buttons { display: flex; gap: 8px; padding-bottom: 4px; flex-wrap: wrap; margin-top: 10px; }
 
-.seg { display: flex; border: 1px solid var(--ink-soft); background: #b9aa88; box-shadow: inset 0 1px 3px rgba(40, 30, 10, 0.5), 0 1px 0 rgba(255, 255, 255, 0.5); }
+.seg { display: flex; overflow: hidden; border: 1px solid var(--ink-soft); background: #b9aa88; box-shadow: inset 0 1px 3px rgba(40, 30, 10, 0.5), 0 1px 0 rgba(255, 255, 255, 0.5); }
 .seg button {
-  flex: 1;
-  padding: 2px 4px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 2px 2px;
   border: 0;
   margin: 2px 1px 4px;
   border-right: 0;
   border: 1px solid var(--rule);
   background: var(--key-face);
   box-shadow: 0 2px 0 #8d7c58, 0 3px 2px rgba(20, 14, 8, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.75);
-  font-size: 12.5px;
+  font-size: 12px;
   cursor: default;
   transition: box-shadow 60ms, transform 60ms;
 }
-.seg button:active { transform: translateY(1px); box-shadow: 0 1px 0 #8d7c58; }
+.seg button:active { box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.45); background: #cfc29c; }
 .seg button:hover:not(.on) { background: var(--paper-light); }
-.seg button.on { background: linear-gradient(#1c160f, #342a1e); color: var(--paper); border-color: #000; box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.6); transform: translateY(1px); }
+.seg button.on { background: linear-gradient(#1c160f, #342a1e); color: var(--paper); border-color: #000; box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.7); }
 
 .slider { display: grid; grid-template-columns: minmax(0, 1fr) 42px; align-items: center; gap: 6px; }
 .slider output { font: 12px var(--mono); text-align: right; }
@@ -413,29 +359,10 @@ input[type='checkbox']:checked::after { content: ''; width: 7px; height: 7px; ba
 ::-webkit-scrollbar-corner { background: var(--paper-dark); }
 @supports not selector(::-webkit-scrollbar) { * { scrollbar-color: var(--brass) var(--paper-dark); } }
 
-/* ---------------------------------------------------------------- toolbox <-> tools on the table */
+/* ---------------------------------------------------------------- tools on the table */
 
-.modeswitch {
-  margin-top: auto;
-  padding: 3px 0;
-  border: 1px solid var(--brass-dark);
-  background: linear-gradient(#d9bd80, var(--brass) 50%, #8f6f35);
-  box-shadow: 0 2px 0 #5c4620, 0 4px 5px rgba(0, 0, 0, 0.5);
-  font: bold 10px var(--serif);
-  font-variant: small-caps;
-  letter-spacing: 0.06em;
-  color: #2a2219;
-  cursor: default;
-}
-.modeswitch:hover { background: linear-gradient(#e8cf94, #c29d57 50%, #9c7b3d); }
-.modeswitch:active { transform: translateY(1px); box-shadow: 0 1px 0 #5c4620; }
-.modeswitch.table-side { position: absolute; left: 10px; top: 0; width: 64px; pointer-events: auto; }
-
-/* In table mode the toolbox column folds away and the tools lie on the table instead. */
-#tabletools { display: none; }
-body.table-tools #app { grid-template-columns: 0 minmax(0, 1fr) 270px; }
-body.table-tools #toolbox { visibility: hidden; padding: 0; border: 0; overflow: hidden; box-shadow: none; }
-body.table-tools #tabletools {
+/* The tools lie on the table at the left edge of the map area. */
+#tabletools {
   position: absolute;
   z-index: 5;
   left: 6px;
@@ -445,7 +372,6 @@ body.table-tools #tabletools {
   display: flex;
   flex-direction: column;
   justify-content: space-around;
-  padding-top: 30px;
   pointer-events: none;
 }
 .ptool {

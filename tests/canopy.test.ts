@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { OUTSIDE, TRUNK, makeTree, outlineDistance, sampleTree, shadowOf, type TreeShape } from '../src/pixel/canopy';
+import { OUTSIDE, TRUNK, TRUNK_LIT, makeTree, outlineDistance, sampleTree, shadowOf, type TreeShape } from '../src/pixel/canopy';
 
 const SHAPES: TreeShape[] = ['round', 'cone', 'jungle', 'shrub'];
 
@@ -23,7 +23,7 @@ describe('canopy trees', () => {
         const t = makeTree(100, 100, r, shape, 1, 77 + r, 0.05);
         const px = raster(t);
         expect(px.some((p) => p.v >= 0)).toBe(true);
-        for (const p of px) if (p.v !== OUTSIDE && p.v !== TRUNK) expect(p.v).toBeGreaterThanOrEqual(0), expect(p.v).toBeLessThanOrEqual(1);
+        for (const p of px) if (p.v !== OUTSIDE && p.v !== TRUNK && p.v !== TRUNK_LIT) expect(p.v).toBeGreaterThanOrEqual(0), expect(p.v).toBeLessThanOrEqual(1);
         // Nothing just outside the box is covered.
         for (let x = t.box[0] - 2; x <= t.box[2] + 2; x++) for (const y of [t.box[1] - 1, t.box[3] + 1]) expect(sampleTree(t, x + 0.5, y + 0.5)).toBe(OUTSIDE);
         for (let y = t.box[1] - 2; y <= t.box[3] + 2; y++) for (const x of [t.box[0] - 1, t.box[2] + 1]) expect(sampleTree(t, x + 0.5, y + 0.5)).toBe(OUTSIDE);
@@ -54,7 +54,7 @@ describe('canopy trees', () => {
   });
 
   it('big trees get a trunk below the crown; small trees and shrubs do not', () => {
-    const trunks = (shape: TreeShape, r: number) => raster(makeTree(100, 100, r, shape, 1, 3, 0)).filter((p) => p.v === TRUNK).length;
+    const trunks = (shape: TreeShape, r: number) => raster(makeTree(100, 100, r, shape, 1, 3, 0)).filter((p) => p.v === TRUNK || p.v === TRUNK_LIT).length;
     expect(trunks('round', 12)).toBeGreaterThan(0);
     expect(trunks('cone', 12)).toBeGreaterThan(0);
     expect(trunks('round', 4)).toBe(0);
@@ -65,6 +65,25 @@ describe('canopy trees', () => {
     const a = raster(makeTree(100, 100, 14, 'round', 1, 1, 0)).map((p) => p.v);
     const b = raster(makeTree(100, 100, 14, 'round', 1, 2, 0)).map((p) => p.v);
     expect(a).not.toEqual(b);
+  });
+
+  it('shares sprites between nearly equal sizes, and keeps variants distinct', () => {
+    const a = makeTree(10, 10, 12.2, 'round', 1, 4, 0), b = makeTree(50, 50, 12.4, 'round', 1, 4, 0);
+    expect(a.sprite).toBe(b.sprite);
+    expect(makeTree(10, 10, 12, 'round', 1, 4, 0).sprite).not.toBe(makeTree(10, 10, 12, 'round', 1, 5, 0).sprite);
+  });
+
+  it('crowns have a real range of tones, not one flat colour', () => {
+    for (const shape of ['round', 'cone'] as TreeShape[]) {
+      const tones = new Set(raster(makeTree(100, 100, 16, shape, 1, 2, 0)).filter((p) => p.v >= 0).map((p) => Math.round(p.v * 4)));
+      expect(tones.size).toBeGreaterThanOrEqual(4);
+    }
+  });
+
+  it('a conifer has a dark hem under each branch layer', () => {
+    const t = makeTree(100, 100, 18, 'cone', 1, 2, 0);
+    const dark = raster(t).filter((p) => p.v === 0).length;
+    expect(dark).toBeGreaterThan(20);
   });
 
   it('puts the cast shadow down-right of the foot', () => {

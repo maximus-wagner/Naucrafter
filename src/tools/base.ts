@@ -10,7 +10,7 @@ import { pathOf, type Item, type Label, type VPath } from '../doc/model';
 import { RAD } from '../doc/geometry';
 import { lineToLonLat, toLonLat, type LonLat } from '../vector/geo';
 
-export type ToolId = 'select' | 'hand' | 'land' | 'cut' | 'river' | 'border' | 'forest' | 'mountains' | 'relief' | 'stamp' | 'text';
+export type ToolId = 'select' | 'hand' | 'measure' | 'land' | 'cut' | 'river' | 'border' | 'forest' | 'mountains' | 'relief' | 'stamp' | 'text';
 
 export interface ToolEvent {
   x: number;
@@ -44,6 +44,12 @@ export interface ToolHost {
   app: App;
   /** Open the inline text editor at a screen position; `done` gets null on cancel. */
   editText(initial: string, x: number, y: number, done: (text: string | null) => void): void;
+  /** Say something short in the status line for a few seconds. */
+  notify(message: string): void;
+  /** Rebuild the properties panel (after the tool's own state changed). */
+  refresh(): void;
+  /** Change the pointer for the active tool; null = the tool's usual cursor. */
+  setCursor(cursor: string | null): void;
 }
 
 export const ACCENT = '#b0391f';

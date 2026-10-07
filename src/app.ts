@@ -1,10 +1,13 @@
 import type { MapView } from './render/mapView';
 import { GeometryCache } from './doc/cache';
 import { cloneItems } from './doc/io';
-import { MOUNTAIN_DEFAULTS, VEGETATION_DEFAULTS, emptyDoc, type Item, type LabelStyle, type MapDoc, type MountainLook, type PaletteKey, type RiverSection, type SymbolKind, type VegetationLook } from './doc/model';
+import { MOUNTAIN_DEFAULTS, VEGETATION_DEFAULTS, emptyDoc, newId, type Item, type LabelStyle, type MapDoc, type MountainLook, type PaletteKey, type RiverSection, type RiverShape, type SymbolKind, type VegetationLook } from './doc/model';
 import { drawMap } from './render/drawMap';
 import { TerrainLayer } from './render/terrain';
 import { RAD } from './doc/geometry';
+import { generateRiverPath } from './doc/riverGen';
+import type { LonLat } from './vector/geo';
+import { play } from './sound';
 import { effectiveStyle, type StyleId } from './render/styles';
 
 export interface Selection {
@@ -27,6 +30,8 @@ export interface Defaults {
   vegetation: VegetationLook;
   mountains: MountainLook;
   riverSection: RiverSection;
+  /** Rivers are drawn by hand, or generated downhill from a clicked spring. */
+  riverMode: 'draw' | 'spring';
   relief: { amount: number; shape: 'area' | 'line'; widthPx: number };
 }
 
@@ -60,6 +65,7 @@ export class App {
     vegetation: { ...VEGETATION_DEFAULTS },
     mountains: { ...MOUNTAIN_DEFAULTS },
     riverSection: 'meander',
+    riverMode: 'draw',
     relief: { amount: 0.5, shape: 'area', widthPx: 24 },
   };
   private undoStack: Snapshot[] = [];
@@ -67,8 +73,12 @@ export class App {
   private listeners: (() => void)[] = [];
 
   constructor(readonly view: MapView) {
-    this.terrain = new TerrainLayer(() => view.requestRender());
-    view.onRender = (p) => drawMap(p, this.doc, this.cache, this.style, this.drawOptions());
+    this.terrain = new TerrainLayer(() => view.requestRender(), () => this.lastRenderMs);
+    view.onRender = (p) => {
+      const t0 = performance.now();
+      drawMap(p, this.doc, this.cache, this.style, this.drawOptions());
+      this.lastRenderMs = performance.now() - t0;
+    };
   }
 
   get style() {
@@ -85,6 +95,8 @@ export class App {
   }
 
   scaleBar = true;
+  /** How long the last full redraw took, ms. */
+  private lastRenderMs = 0;
 
   private terrain: TerrainLayer;
 
@@ -144,10 +156,14 @@ export class App {
     item.rev = revCounter++;
     this.doc.items.push(item);
     this.view.requestRender();
-    if (select) this.select({ id: item.id, node: null });
+    if (select) {
+      play('craft');
+      this.select({ id: item.id, node: null });
+    }
   }
 
   remove(...ids: string[]): void {
+    play('fail');
     const gone = new Set(ids);
     this.doc.items = this.doc.items.filter((i) => !gone.has(i.id));
     this.cache.prune(this.doc.items);
@@ -179,6 +195,7 @@ export class App {
   private step(from: Snapshot[], to: Snapshot[]): void {
     const s = from.pop();
     if (!s) return;
+    play('back');
     to.push(this.snapshot());
     this.doc.items = s.items;
     this.doc.seed = s.seed;
@@ -197,6 +214,28 @@ export class App {
     this.undoStack.length = this.redoStack.length = 0;
     this.view.requestRender();
     this.emit();
+  }
+
+  /**
+   * A river that flows downhill from `at`, following the terrain to the sea (or into a river it
+   * meets). With `replace`, that river is re-routed from the given point instead of adding one.
+   * Null if `at` isn't on land.
+   */
+  generateRiver(at: LonLat, replace?: RiverShape): RiverShape | null {
+    const gen = generateRiverPath(this.doc, this.cache, this.terrain.probe(this.doc, this.cache), at, replace?.id);
+    if (!gen) return null;
+    this.checkpoint();
+    if (replace) {
+      replace.path = gen.path;
+      this.touch(replace);
+      this.emit();
+      return replace;
+    }
+    // Longer rivers are wider; a tributary is slimmer where it meets its parent.
+    const widthPx = Math.max(this.defaults.riverPx, Math.min(16, gen.length * this.view.projection.scale() * 0.015)) * (gen.routed.joined ? 0.6 : 1);
+    const river: RiverShape = { id: newId(), rev: 0, kind: 'river', path: gen.path, width: widthPx / this.ppd(), rough: this.defaults.rough };
+    this.add(river);
+    return river;
   }
 
   setPlanetRadius(radiusKm: number): void {
